@@ -1,0 +1,20 @@
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import java.io.BufferedWriter
+import java.io.File
+import java.io.FileWriter
+
+fun saveToJson(logData : Any, outputFolder : String, fileName: String) {
+    val mapper = jacksonObjectMapper().registerKotlinModule()
+    val jsonString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(logData)
+
+    val bufWriter = BufferedWriter(FileWriter("$outputFolder/$fileName.json"))
+    bufWriter.write(jsonString)
+    bufWriter.close()
+}
+
+fun <T> loadJson(fileName : String, loadClass : Class<T>) : T {
+    val mapper = jacksonObjectMapper().registerKotlinModule()
+    return mapper.readValue(File(fileName), loadClass)
+}

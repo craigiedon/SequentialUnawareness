@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/SequentialPlanning.iml" filepath="$PROJECT_DIR$/.idea/modules/SequentialPlanning.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/SequentialPlanning_main.iml" filepath="$PROJECT_DIR$/.idea/modules/SequentialPlanning_main.iml" group="SequentialPlanning" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/SequentialPlanning_test.iml" filepath="$PROJECT_DIR$/.idea/modules/SequentialPlanning_test.iml" group="SequentialPlanning" />
+    </modules>
+  </component>
+</project>
