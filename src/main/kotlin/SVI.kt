@@ -27,16 +27,6 @@ fun <T> leavesWithHistory(decisionTree: DecisionTree<T>, currentHistory : RVAssi
     }
 }
 
-fun <K, T> prune(valQPair : Pair<DecisionTree<T>, Map<K, DecisionTree<T>>>) =
-    Pair(prune(valQPair.first), prune(valQPair.second))
-
-fun <K, T> prune(dts : Map<K, DecisionTree<T>>) : Map<K, DecisionTree<T>>{
-    return dts.mapValues { (_, dt) -> prune(dt) }
-}
-
-fun <T> prune(dt : DecisionTree<T>) : DecisionTree<T> {
-    return dt
-}
 
 fun <T, S> foldTree (dTree : DecisionTree<T>, initial : S, accFunc : (S, T) -> S) : S =
     when(dTree){
@@ -226,8 +216,9 @@ fun structuredValueIteration(rewardTree : DecisionTree<Double>, actionDBNs: Map<
     return Pair(finalPolicy, valueTree)
 }
 
-fun incrementalSVI(rewardTree : DecisionTree<Double>, valueTree : DecisionTree<Double>, actionDBNs : Map<Action, DynamicBayesNet>) : Pair<VTree, Map<Action, QTree>>{
-    val qTrees = actionDBNs.mapValues { regress (valueTree, rewardTree, it.value) }
+fun incrementalSVI(rewardTree : DecisionTree<Double>, valueTree : DecisionTree<Double>, actionDBNs : Map<Action, DynamicBayesNet>, pruningThresh : Double = 0.0) : Pair<VTree, Map<Action, QTree>>{
+    val prunedValueTree = prune(valueTree, pruningThresh)
+    val qTrees = actionDBNs.mapValues { regress (prunedValueTree, rewardTree, it.value) }
     val newValueTree = merge(qTrees.values, ::maxOf, ::doubleEquality)
     return Pair(newValueTree, qTrees)
 }
@@ -369,6 +360,29 @@ fun <T> simplify(dt : DecisionTree<T>, equalityTest : (T, T) -> Boolean, branchH
             }
         }
     }
+}
+
+fun prune(dt : DecisionTree<Double>, threshold : Double) : DecisionTree<Double> {
+    fun pruneRanged(rt : DecisionTree<Double>) : DecisionTree<Pair<Double, Double>> {
+        when(rt){
+            is DTLeaf -> return DTLeaf(Pair(rt.value, rt.value))
+            is DTDecision -> {
+                val prunedBranches = rt.branches.map(::pruneRanged)
+                if (!prunedBranches.all { it is DTLeaf }){
+                    return DTDecision(rt.rv, prunedBranches)
+                }
+                val childRanges = prunedBranches.map { (it as DTLeaf<Pair<Double, Double>>).value }
+                val maxVal : Double = childRanges.map { it.second }.max()!!
+                val minVal : Double = childRanges.map { it.first }.min()!!
+                if(maxVal - minVal < threshold){
+                    return DTLeaf(Pair(minVal, maxVal))
+                }
+                return DTDecision(rt.rv, prunedBranches)
+            }
+        }
+    }
+
+    return fMap(pruneRanged(dt), {(min, max) -> (min + max) / 2.0})
 }
 
 fun <T> merge(dts : Collection<DecisionTree<T>>, mergeFunc: (T, T) -> T, equalityTest: (T, T) -> Boolean) =

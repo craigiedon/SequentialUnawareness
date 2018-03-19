@@ -25,12 +25,12 @@ class SVITests{
 
     val rewardTree = DTDecision(Z, listOf(DTLeaf(0.0), DTLeaf(10.0)))
 
-    val dbn = DynamicBayesNet(mapOf(
+    val dbn = mapOf(
         X to xCPD,
         Y to yCPD,
         Z to zCPD,
         W to wCPD
-    ))
+    )
 
     val value1Step = DTDecision(Z, listOf(
         DTDecision(Y, listOf(

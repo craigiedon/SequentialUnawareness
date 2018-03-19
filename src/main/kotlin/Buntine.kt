@@ -1,6 +1,7 @@
 import Utils.defaultMap
 import Utils.logNormalize
 import Utils.sumInnerLnProbs
+import java.sql.Time
 import java.util.*
 
 /* So, what do I actually want to do in here?
@@ -35,50 +36,70 @@ data class SeqPInfo(val child : RandomVariable, val parentSet : PSet, val logPro
 data class DBNInfo(
     val reasonableParents : Map<RandomVariable, List<SeqPInfo>>,
     val bestPInfos : Map<RandomVariable, SeqPInfo>,
-    val cptsITI : Map<RandomVariable, ProbTree>,
+    val cptsITI : Map<RandomVariable, ProbTreeITI>,
     val priorJointParams : Map<RandomVariable, DecisionTree<Factor>>,
     val dbn : DynamicBayesNet,
     val pSetPriors : Map<RandomVariable, LogPrior<PSet>>,
     val lastStructUpdate : Int
-)
+){
+    val vocab : Set<RandomVariable> get() = reasonableParents.keys
+}
 
 
 class BuntineUpdater(private val aliveThresh: Double, private val pseudoCountSize : Double, private val singleParentProb : Double) {
 
-    fun addBeliefVariable(newVar: RandomVariable, timeStep: Int, seqTrials: List<SequentialTrial>, expertEv: List<DirEdge>, dbnInfo: DBNInfo): DBNInfo {
+    fun addBeliefVariables(newVars: Set<RandomVariable>, timeOfUpdate: Int, seqTrials: List<SequentialTrial>, expertEv: List<DirEdge>, dbnInfo: DBNInfo): DBNInfo {
         val oldVocab = dbnInfo.bestPInfos.keys
         val oldVocabReasonablePs = dbnInfo.reasonableParents.mapValues { (rv, _) ->
             structuralUpdate(rv, dbnInfo.pSetPriors[rv]!!, oldVocab, seqTrials, expertEv, dbnInfo.priorJointParams[rv]!!, aliveThresh, pseudoCountSize)
         }
         val oldVocabBest = bestParents(oldVocabReasonablePs)
-        val oldVocabCPTs = dbnInfo.cptsITI.mapValues { (rv, cpt) -> changeVocab(cpt, oldVocabBest[rv]!!.parentSet) }
+        val oldVocabCPTs = dbnInfo.cptsITI.mapValues { (rv, cpt) -> cpt.changeAllowedVocab(oldVocabBest[rv]!!.parentSet) }
 
         // Also, remake your dbn at this point (decision trees and all):
         val priorJointParams = oldVocabCPTs.mapValues { (rv, cpt) -> convertToJointProbTree(cpt, dbnInfo.priorJointParams[rv]!!, pseudoCountSize) }
-        val (logPriors, reasonableParents) = posteriorToPrior(oldVocabReasonablePs, oldVocab, setOf(newVar), priorJointParams, singleParentProb, aliveThresh, pseudoCountSize)
+        val (logPriors, reasonableParents) = posteriorToPrior(oldVocabReasonablePs, oldVocab, newVars, priorJointParams, singleParentProb, aliveThresh, pseudoCountSize)
 
 
         val bestParents = bestParents(reasonableParents)
-        val cptsITI = initialCPTsITI(oldVocab + newVar, bestParents, priorJointParams, pseudoCountSize)
+        val cptsITI = initialCPTsITI(oldVocab + newVars, bestParents, priorJointParams, pseudoCountSize)
         val dbn = oldVocabCPTs.mapValues { (rv, cpt) -> convertToCPT(cpt, oldVocabBest[rv]!!.priorParams, pseudoCountSize) }
 
-        return DBNInfo(reasonableParents, bestParents, cptsITI, priorJointParams, dbn, logPriors, timeStep)
+        return DBNInfo(reasonableParents, bestParents, cptsITI, priorJointParams, dbn, logPriors, timeOfUpdate)
         // Throw away old trial counts
         //agentTrialHist[a]!!.clear()
     }
 
-    fun initialDBNInfo(actions: Set<Action>, vocab: Set<RandomVariable>, expertEv: List<DirEdge>): Map<Action, DBNInfo> {
-        return actions.associate { a ->
-            val priorJointParams = unifStartIDTransJointDBN(vocab, 0.1)
-            val pSetPriors = initialPSetPriors(vocab, singleParentProb)
-            val reasonableParents = structuralUpdate(vocab, emptyList(), expertEv, pSetPriors, aliveThresh, priorJointParams, pseudoCountSize)
-            val bestPInfos = bestParents(reasonableParents)
-            val cptsITI = initialCPTsITI(vocab, bestPInfos, priorJointParams, pseudoCountSize)
-            val dbn = cptsITIToDBN(bestPInfos, cptsITI, pseudoCountSize)
+    fun initialDBNInfo(vocab: Set<RandomVariable>, expertEv: List<DirEdge>, timeStep: TimeStamp): DBNInfo {
+        val priorJointParams = unifStartIDTransJointDBN(vocab, 0.1)
+        val pSetPriors = initialPSetPriors(vocab, singleParentProb)
+        val reasonableParents = structuralUpdate(vocab, emptyList(), expertEv, pSetPriors, aliveThresh, priorJointParams, pseudoCountSize)
+        val bestPInfos = bestParents(reasonableParents)
+        val cptsITI = initialCPTsITI(vocab, bestPInfos, priorJointParams, pseudoCountSize)
+        val dbn = cptsITIToDBN(bestPInfos, cptsITI, pseudoCountSize)
 
-            val dbnInfo = DBNInfo(reasonableParents, bestPInfos, cptsITI, priorJointParams, dbn, pSetPriors, 0)
-            Pair(a, dbnInfo)
+        return DBNInfo(reasonableParents, bestPInfos, cptsITI, priorJointParams, dbn, pSetPriors, timeStep)
+    }
+
+    fun trialUpdate(seqTrial : SequentialTrial, trialHistory : List<SequentialTrial>, expertEv : List<DirEdge>, timeOfUpdate: TimeStamp, dbnInfo: DBNInfo) : DBNInfo{
+        var newReasonableParents = dbnInfo.reasonableParents.mapValues { (rv, rps) -> parameterUpdate(rv, rps, seqTrial, expertEv, pseudoCountSize ) }
+        var lastStructUpdate = dbnInfo.lastStructUpdate
+
+        if(timeOfUpdate - dbnInfo.lastStructUpdate > 50){
+            lastStructUpdate = timeOfUpdate
+            newReasonableParents = newReasonableParents.mapValues { (rv, _) -> structuralUpdate(rv, dbnInfo.pSetPriors[rv]!!, dbnInfo.vocab, trialHistory, expertEv, dbnInfo.priorJointParams[rv]!!, aliveThresh, pseudoCountSize) }
         }
+        val bestParents = bestParents(newReasonableParents)
+
+        // Im not 100% sold on this coupling of cpt tree updates with buntine updater (which should only really be about structure i think...)
+        val cptsITI = dbnInfo.cptsITI.mapValues { (rv, cpt) ->
+            val newVocabDT = cpt.changeAllowedVocab(bestParents[rv]!!.parentSet)
+            newVocabDT.incrementalUpdate(listOf(seqTrial))
+        }
+
+        val dbn = cptsITIToDBN(bestParents, cptsITI, pseudoCountSize)
+
+        return dbnInfo.copy(reasonableParents = newReasonableParents, bestPInfos = bestParents(newReasonableParents), lastStructUpdate = lastStructUpdate)
     }
 }
 

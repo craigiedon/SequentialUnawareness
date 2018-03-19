@@ -5,9 +5,10 @@ class ITITests{
     fun incUpdate_emptyTree_singleLeaf(){
         val vocab = setOf(A, B, C)
         val trial = Trial(mapOf(A to 0, B to 0, C to 0), 10.0)
+        val trials = listOf(trial)
 
-        val expected = RLeaf(vocab, vocab, listOf(trial))
-        val result = incrementalUpdate(RLeaf(vocab, vocab, emptyList()), trial)
+        val expected = RLeaf(vocab, vocab, createStats(vocab, trials), trials)
+        val result = incrementalUpdate(RLeaf(vocab, vocab, emptyMap(), emptyList()), trial)
         Assert.assertEquals(expected, result)
     }
 
@@ -86,30 +87,6 @@ class ITITests{
         val result = addExamples(dt, listOf(missingAssignments))
         Assert.assertEquals(expected, result)
     }
-
-    /*
-    Note: This test FAILS! This is because it is difficult to update an array without side effects.
-    Copying over the entire array for every update is too expensive
-
-    @Test
-    fun addExamples_addTrials_doesntAffectInputStats(){
-        val testCandidates = mapOf(Pair(B, 0) to TestStats(B, 0, HashMap(), HashMap()))
-        val vocab = setOf(A, B, C)
-        val dt = RDecision(
-            Pair(B, 0),
-            testCandidates,
-            RLeaf(emptyList(), vocab - B),
-            RDecision(
-                Pair(C, 1),
-                emptyMap(),
-                RLeaf(emptyList(), setOf(A)),
-                RLeaf(emptyList(), setOf(A)))
-        )
-        val trial = Trial(mapOf(A to 0, B to 0, C to 0), 10.0)
-        addExamples(dt, listOf(trial))
-        Assert.assertEquals(mapOf(Pair(B, 0) to TestStats(B, 0, HashMap(), HashMap())), dt.testCandidates)
-    }
-    */
 
     @Test
     fun tranpose_bothLeaves_replacementTestRVUnavailableButNewOneOpen(){

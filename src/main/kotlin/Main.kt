@@ -16,52 +16,36 @@ fun main(args : Array<String>){
 
     var agentVocab = trueMDP.vocab.toSet()
     val agentActions = mutableSetOf("A1")
-    val priorJointParams = agentActions.associate { Pair(it, unifStartIDTransJointDBN(agentVocab, 0.1)) }.toMutableMap()
-
-    val agentTrialHist = agentActions.associate { Pair(it, ArrayList<SequentialTrial>()) }.toMutableMap()
+    val agentTrialHist = agentActions.associate { Pair(it, ArrayList<Pair<TimeStamp, SequentialTrial>>()) }.toMutableMap()
     val expertEv = emptyList<DirEdge>()
     val actionAdvice = HashMap<RVAssignment, Pair<TimeStamp, Action>>()
 
-    val agentDBNInfos : Map<Action, DBNInfo> = buntineUpdater.initialDBNInfo(agentActions, agentVocab, expertEv)
+    val agentDBNInfos = agentActions.associate{ Pair(it, buntineUpdater.initialDBNInfo(agentVocab, expertEv, 0))}.toMutableMap()
 
-    // 1. Set Buntine Prior
-    val pSetPriors = initialPSetPriors(agentActions, agentVocab, singleParentProb)
-
-    // 2. Set Initial Reasonable Parents and probabilities
-    val reasonableParents = pSetPriors.mapValues { (action, priors) ->
-        structuralUpdate(agentVocab, emptyList(), expertEv, priors, aliveThresh, priorJointParams[action]!!, pseudoCountSize)
-    }.toMutableMap()
-
-    val bestPInfos = reasonableParents.mapValues { (_, rps) -> bestParents(rps) }.toMutableMap()
-
-    // 3. Set initial DBNs based on reasonable parents, zero counts, prior dbn...
-    val cptsITI = initialCPTsITI(agentActions, agentVocab, bestPInfos, priorJointParams, pseudoCountSize)
-
-    // 4. Convert county DBNs into parametery dbns
-    val agentDBNs = cptsITIToDBNs(bestPInfos, cptsITI, pseudoCountSize)
 
     val initARewardScope = setOf(trueMDP.rewardScope.random())
     var agentRewardITI : RewardTree = RLeaf(initARewardScope, initARewardScope, createStats(initARewardScope, emptyList()), emptyList())
     var agentRewardDT = convertFromITI(agentRewardITI)
     var agentValueTree = agentRewardDT
-    var agentPolicy = choosePolicy(agentDBNs.mapValues { (_, dbn) -> regress(agentValueTree, agentRewardDT, dbn) })
+    var agentPolicy = choosePolicy(agentDBNInfos.mapValues { (_, dbnInfo) -> regress(agentValueTree, agentRewardDT, dbnInfo.dbn) })
     val existRewardStates : MutableList<Trial> = ArrayList()
 
     var previousState = generateSample(trueMDP.vocab.toList())
 
-    val lastStructUpdate = agentActions.associate { Pair(it, 0) }.toMutableMap()
-    for(timeStep in 0..999){
+    var tStep = 0
+    while(tStep < 3000){
         // e greedy choice strategy at the moment
         val projectedPrevState = project(previousState, agentVocab)
-        val chosenAction = if(Math.random() < 0.9) matchLeaf(agentPolicy, previousState).value else agentActions.toList().random()
+        val chosenAction = eGreedy(agentActions, agentPolicy, previousState, 0.1)
 
         // Remember to project this onto agent's known vocabulary
         val newTrueState = generateSample(trueMDP.dbns[chosenAction]!!, previousState)
         val projectedNewState = project(newTrueState, agentVocab)
         val reward = matchLeaf(trueMDP.rewardTree, newTrueState).value
-        val agentSeqTrial = SequentialTrial(projectedPrevState, chosenAction, projectedNewState, reward)
 
+        val agentSeqTrial = Pair(tStep, SequentialTrial(projectedPrevState, chosenAction, projectedNewState, reward))
         agentTrialHist[chosenAction]!!.add(agentSeqTrial)
+        expert.stateHist[tStep] = newTrueState
 
         // Reward Function Update
         val oldVocab = agentVocab
@@ -80,6 +64,7 @@ fun main(args : Array<String>){
             val solvableReward = unfactoredReward(agentRewardITI.vocab.toList() , existRewardStates)
             if(solvableReward == null){
                 val newRewardVars = whatsInRewardScope(agentRewardITI.vocab, expert)
+                tStep += 1
                 agentRewardITI = addAdditionalVocab(agentRewardITI, newRewardVars)
                 agentVocab += newRewardVars
             }
@@ -89,99 +74,43 @@ fun main(args : Array<String>){
         }
 
         if(oldVocab != agentVocab){
-            // Do a structural update with old vocab to get most up-to-date reasonable parent set
-            lastStructUpdate.mapValues { timeStep }
-            for((a, rpMap) in reasonableParents){
-                reasonableParents[a] = rpMap.mapValues { (rv, _) -> structuralUpdate(rv, pSetPriors[a]!![rv]!!, agentVocab, agentTrialHist[a]!!, expertEv, priorJointParams[a]!![rv]!!, aliveThresh, pseudoCountSize) }
-                bestPInfos[a] = bestParents(reasonableParents[a]!!)
-                cptsITI[a] = cptsITI[a]!!.mapValues { (rv, cpt) ->
-                    changeVocab(cpt, bestPInfos[a]!![rv]!!.parentSet)
-                }
-
-                // Also, remake your dbn at this point (decision trees and all):
-                agentDBNs[a] = cptsITI[a]!!.mapValues { (rv, cpt) ->
-                    convertToCPT(cpt, bestPInfos[chosenAction]!![rv]!!.priorParams, pseudoCountSize)
-                }
-
-                priorJointParams[a] = cptsITI[a]!!.mapValues { (rv, cpt) ->
-                    convertToJointProbTree(cpt, priorJointParams[a]!![rv]!!, pseudoCountSize)
-                }
-
-                // Do your "posterior to prior" stuff: I.e create new prior based on prev reasonable parents plus addition of new vocab
-                val parentExtensionResult = posteriorToPrior(reasonableParents[a]!!, agentVocab, agentVocab - oldVocab, priorJointParams[a]!!, singleParentProb, aliveThresh, pseudoCountSize)
-                pSetPriors[a] = parentExtensionResult.logPriors
-                reasonableParents[a] = parentExtensionResult.reasonableParents
-
-                // Throw away old trial counts
-                agentTrialHist[a]!!.clear()
-
-                bestPInfos[a] = bestParents(reasonableParents[a]!!)
-                cptsITI[a] = initialCPTsITI(agentVocab, bestPInfos[a]!!, priorJointParams[a]!!, pseudoCountSize)
-                agentDBNs[a] = cptsITI[a]!!.mapValues { (rv, cpt) -> convertToCPT(cpt, bestPInfos[a]!![rv]!!.priorParams, pseudoCountSize) }
-            }
+            agentDBNInfos.mapValues { (a, dbnInfo) -> buntineUpdater.addBeliefVariables(agentVocab - oldVocab, tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo) }
+            agentTrialHist.forEach{ _, trials -> trials.clear() }
+            actionAdvice.clear()
         }
         else{
-            // Belief Function Update
-            // 1. On relevant action dbn, add trial via parameter update
-            var newReasonableParents = reasonableParents[chosenAction]!!.mapValues { (rv, rps) -> parameterUpdate(rv, rps, agentSeqTrial, expertEv, pseudoCountSize ) }
-
-            // 2. If relevant condition triggered for structural update (empty reasonable parents, all reasonable zero, or 100 stateHist passed), do structural update
-            // Why do we count interval over all variables? Surely each one individually would allow for greater control / less structural updates
-            if(agentTrialHist[chosenAction]!!.size - lastStructUpdate[chosenAction]!! > 50){
-                lastStructUpdate[chosenAction] = timeStep
-                newReasonableParents = newReasonableParents.mapValues { (rv, _) -> structuralUpdate(rv, pSetPriors[chosenAction]!![rv]!!, agentVocab, agentTrialHist[chosenAction]!!, expertEv, priorJointParams[chosenAction]!![rv]!!, aliveThresh, pseudoCountSize) }
-            }
-            reasonableParents[chosenAction] = newReasonableParents
-
-            // 3. Regardless of pset update, need to choose new most likely structure, check for consistency, and (if all fine, proceed to construct new cpd)
-            bestPInfos[chosenAction] = bestParents(reasonableParents[chosenAction]!!)
-
-            // 3 (b) (Consider structural constraints (what will you do if they are violated?))
-            val structuralConstraintsHold = true // "Useless-vars?" function
-            if(!structuralConstraintsHold){
-                throw NotImplementedError("Haven't figured out how to handle this yet. Ask structure question? Ignore? Email Supervisor")
-            }
+            agentDBNInfos[chosenAction] = buntineUpdater.trialUpdate(agentSeqTrial.second, agentTrialHist[chosenAction]!!.map{it.second}, expertEv, tStep, agentDBNInfos[chosenAction]!!)
         }
 
-        cptsITI[chosenAction] = cptsITI[chosenAction]!!.mapValues { (rv, cpt) ->
-            val newVocabDT = changeVocab(cpt, bestPInfos[chosenAction]!![rv]!!.parentSet)
-            incrementalUpdate(newVocabDT, listOf(agentSeqTrial))
-        }
 
-        agentDBNs[chosenAction] = cptsITIToDBN(bestPInfos[chosenAction]!!, cptsITI[chosenAction]!!, pseudoCountSize)
-
-
+        // Better Action Advice
         expert.agentOptimalActionHistory.add(wasActionOptimal(previousState, chosenAction, trueQs))
-        // If agent did suboptimal action in previous state
-        // And has acted suboptimally a sufficient proprortion of times in the past
-        if(timeStep - expert.lastAdvice < expert.adviceInterval && !expert.agentOptimalActionHistory.last() && poorRecentPerformance(expert.agentOptimalActionHistory, expert.historyWindow, expert.mistakeProportion)){
+        if(tStep - expert.lastAdvice < expert.adviceInterval && !expert.agentOptimalActionHistory.last() && poorRecentPerformance(expert.agentOptimalActionHistory, expert.historyWindow, expert.mistakeProportion)){
             // Then tell the agent about the better action
             val betterAction = betterActionAdvice(previousState, expert)
+            tStep += 1
 
             if(betterAction !in agentActions){
                 agentActions.add(betterAction)
-
-                priorJointParams[betterAction] = unifStartIDTransJointDBN(agentVocab, 0.1)
+                agentDBNInfos[betterAction] = buntineUpdater.initialDBNInfo(agentVocab, expertEv, tStep)
                 agentTrialHist[betterAction] = ArrayList()
-                pSetPriors[betterAction] = initialPSetPriors(agentVocab, singleParentProb)
-                reasonableParents[betterAction] = structuralUpdate(agentVocab, agentTrialHist[betterAction]!!, expertEv, pSetPriors[betterAction]!!, aliveThresh, priorJointParams[betterAction]!!, pseudoCountSize)
-                bestPInfos[betterAction] = bestParents(reasonableParents[betterAction]!!)
-                cptsITI[betterAction] = initialCPTsITI(agentVocab, bestPInfos[betterAction]!!, priorJointParams[betterAction]!!, pseudoCountSize)
-                agentDBNs[betterAction] = cptsITIToDBN(bestPInfos[betterAction]!!, cptsITI[betterAction]!!, pseudoCountSize)
             }
 
-            val (newValue, _) = applyExpertAdvice(agentRewardDT, agentValueTree, agentDBNs, Pair(projectedPrevState, betterAction))
+            val (newValue, _) = applyExpertAdvice(agentRewardDT, agentValueTree, agentDBNInfos.mapValues{ it.value.dbn }, Pair(projectedPrevState, betterAction))
             agentValueTree = newValue
 
 
             // Resolving misunderstandings
             if(!actionAdvice.containsKey(projectedPrevState) || actionAdvice[projectedPrevState]!!.second == betterAction){
-                actionAdvice[projectedPrevState] = Pair(prevStateTS, betterAction)
+                actionAdvice[projectedPrevState] = Pair(agentSeqTrial.first, betterAction)
             }
             else{
                 val earlierAdvice = actionAdvice[projectedPrevState]!!
-                val latestAdvice = Pair(prevStateTS, betterAction)
+                val latestAdvice = Pair(agentSeqTrial.first, betterAction)
                 val resolution = resolveMisunderstanding(earlierAdvice.first, latestAdvice.first, expert)
+
+                tStep += 1
+
                 val resolutionVar = resolution.firstAssignment.first
                 if(resolutionVar in agentVocab){
                     throw IllegalStateException("If differing variable was already in agent vocab, then why was there a misunderstanding?")
@@ -191,71 +120,41 @@ fun main(args : Array<String>){
                 actionAdvice[projectedPrevState + resolution.secondAssignment] = latestAdvice
 
                 agentVocab += resolutionVar
-                // Add new belief variable
-                // This whole part is probably extractable into a function
-                // Do a structural update with old vocab to get most up-to-date reasonable parent set
-                lastStructUpdate.mapValues { timeStep }
-                for((a, rpMap) in reasonableParents){
-                    reasonableParents[a] = rpMap.mapValues { (rv, _) -> structuralUpdate(rv, pSetPriors[a]!![rv]!!, agentVocab, agentTrialHist[a]!!, expertEv, priorJointParams[a]!![rv]!!, aliveThresh, pseudoCountSize) }
-                    bestPInfos[a] = bestParents(reasonableParents[a]!!)
-                    cptsITI[a] = cptsITI[a]!!.mapValues { (rv, cpt) ->
-                        changeVocab(cpt, bestPInfos[a]!![rv]!!.parentSet)
-                    }
-
-                    // Also, remake your dbn at this point (decision trees and all):
-                    agentDBNs[a] = cptsITI[a]!!.mapValues { (rv, cpt) ->
-                        convertToCPT(cpt, bestPInfos[chosenAction]!![rv]!!.priorParams, pseudoCountSize)
-                    }
-
-                    priorJointParams[a] = cptsITI[a]!!.mapValues { (rv, cpt) ->
-                        convertToJointProbTree(cpt, priorJointParams[a]!![rv]!!, pseudoCountSize)
-                    }
-
-                    // Do your "posterior to prior" stuff: I.e create new prior based on prev reasonable parents plus addition of new vocab
-                    val parentExtensionResult = posteriorToPrior(reasonableParents[a]!!, agentVocab, setOf(resolutionVar), priorJointParams[a]!!, singleParentProb, aliveThresh, pseudoCountSize)
-                    pSetPriors[a] = parentExtensionResult.logPriors
-                    reasonableParents[a] = parentExtensionResult.reasonableParents
-
-                    // Throw away old trial counts
-                    agentTrialHist[a]!!.clear()
-
-                    bestPInfos[a] = bestParents(reasonableParents[a]!!)
-                    cptsITI[a] = initialCPTsITI(agentVocab, bestPInfos[a]!!, priorJointParams[a]!!, pseudoCountSize)
-                    agentDBNs[a] = cptsITI[a]!!.mapValues { (rv, cpt) -> convertToCPT(cpt, bestPInfos[a]!![rv]!!.priorParams, pseudoCountSize) }
-                }
+                agentDBNInfos.mapValues { (a, dbnInfo) -> buntineUpdater.addBeliefVariables(setOf(resolutionVar), tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo) }
+                agentTrialHist.forEach { _, trials -> trials.clear() }
             }
         }
 
         // Policy Updates
-        val (newValue, newQTrees) = prune(incrementalSVI(agentRewardDT, agentValueTree, agentDBNs))
+        val (newValue, newQTrees) = incrementalSVI(agentRewardDT, agentValueTree, agentDBNInfos.mapValues {it.value.dbn} )
         agentValueTree = newValue
         agentPolicy = choosePolicy(newQTrees)
 
         previousState = newTrueState
-
-        // Remember to bin all your inferences when discovering new belief vocab
     }
 }
 
 
-private fun cptsITIToDBNs(bestPInfos: Map<Action, Map<RandomVariable, SeqPInfo>>, cptsITI: Map<Action, Map<RandomVariable, ProbTree>>, pseudoCountSize: Double): MutableMap<String, DynamicBayesNet> {
+private fun cptsITIToDBNs(bestPInfos: Map<Action, Map<RandomVariable, SeqPInfo>>, cptsITI: Map<Action, Map<RandomVariable, ProbTreeITI>>, pseudoCountSize: Double): MutableMap<String, DynamicBayesNet> {
     return cptsITI
         .mapValues { (a, cpts) -> cptsITIToDBN(bestPInfos[a]!!, cpts, pseudoCountSize) }
         .toMutableMap()
 }
 
-fun cptsITIToDBN(bestPInfos : Map<RandomVariable, SeqPInfo>, cptsITI: Map<RandomVariable, ProbTree>, pseudoCountSize: Double) =
+fun cptsITIToDBN(bestPInfos : Map<RandomVariable, SeqPInfo>, cptsITI: Map<RandomVariable, ProbTreeITI>, pseudoCountSize: Double) =
     cptsITI.mapValues { (rv, dt) -> convertToCPT(dt, bestPInfos[rv]!!.priorParams, pseudoCountSize)}
 
-private fun initialCPTsITI(agentActions: MutableSet<String>, agentVocab: Set<RandomVariable>, bestPInfos: MutableMap<Action, Map<RandomVariable, SeqPInfo>>, priorDBNs: MutableMap<String, DynamicBayesNet>, pseudoCountSize: Double): MutableMap<Action, Map<RandomVariable, ProbTree>> =
+private fun initialCPTsITI(agentActions: MutableSet<String>, agentVocab: Set<RandomVariable>,
+                           bestPInfos: MutableMap<Action, Map<RandomVariable, SeqPInfo>>,
+                           priorDBNs: MutableMap<String, DynamicBayesNet>, pseudoCountSize: Double): MutableMap<Action, Map<RandomVariable, ProbTreeITI>> =
     agentActions
         .associate { Pair(it, initialCPTsITI(agentVocab, bestPInfos[it]!!, priorDBNs[it]!!, pseudoCountSize)) }
         .toMutableMap()
 
-fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPInfos: Map<RandomVariable, SeqPInfo>, priorDBN: DynamicBayesNet, pseudoCountSize: Double): Map<RandomVariable, ProbTree> =
+fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPInfos: Map<RandomVariable, SeqPInfo>, priorDBN: DynamicBayesNet, pseudoCountSize: Double): Map<RandomVariable, ProbTreeITI> =
     agentVocab.associate { rv ->
         val bestPSet = bestPInfos[rv]!!.parentSet
-        Pair(rv, emptyPLeaf(rv, bestPSet, priorDBN[rv]!!, pseudoCountSize))
+        Pair(rv, ProbTreeITI(rv, bestPSet, priorDBN[rv]!!, pseudoCountSize))
     }
 
 fun initialPSetPriors(actions : Set<Action>, beliefVocab : Set<RandomVariable>, singleParentProb : Double) =
@@ -307,18 +206,6 @@ fun posteriorToPrior(reasonableParents : Map<RandomVariable, List<SeqPInfo>>, ol
     return ParentExtResult(priorFuncs, newReasonable)
 }
 
-/*
-data class Agent(
-    val vocab : Set<RandomVariable>,
-    val trials : Map<Action, SequentialTrial>,
-    val priorDBN : DynamicBayesNet,
-    val reasonableParents : Map<Action, List<SeqPInfo>>,
-    val pSetPriors : Map<Action, Map<RandomVariable, LogPrior<PSet>>>,
-    val dbnITI : Map<Action, Map<RandomVariable, ProbTree>>,
-    val dbns : Map<Action, DynamicBayesNet>,
-    val rewardITI : RewardTree,
-    val reward : DecisionTree<Reward>,
-    val valueTree : DecisionTree<Double>,
-    val policy : DecisionTree<Action>
-)
-*/
+fun eGreedy(actions : Set<Action>, exploitPolicy : PolicyTree, state : RVAssignment, exploreAmount : Double) : Action =
+    if(Math.random() < 1 - exploreAmount) matchLeaf(exploitPolicy, state).value else actions.random()
+
