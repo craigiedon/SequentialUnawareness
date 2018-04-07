@@ -24,11 +24,11 @@ fun main(args : Array<String>){
 
 
     val initARewardScope = setOf(trueMDP.rewardScope.random())
-    var agentRewardITI : RewardTree = RLeaf(initARewardScope, initARewardScope, createStats(initARewardScope, emptyList()), emptyList())
-    var agentRewardDT = convertFromITI(agentRewardITI)
+    var agentRewardITI = emptyRewardTree(initARewardScope)
+    var agentRewardDT = convertFromITI(agentRewardITI.first)
     var agentValueTree = agentRewardDT
     var agentPolicy = choosePolicy(agentDBNInfos.mapValues { (_, dbnInfo) -> regress(agentValueTree, agentRewardDT, dbnInfo.dbn) })
-    val existRewardStates : MutableList<Trial> = ArrayList()
+    val existRewardStates = ArrayList<Trial>()
 
     var previousState = generateSample(trueMDP.vocab.toList())
 
@@ -55,22 +55,22 @@ fun main(args : Array<String>){
             if(redundantTrial != null){
                 //If we havent seen this exact one before, but there is a trial that matches on a subset, *remove* it from the list of existential states
                 existRewardStates.remove(redundantTrial)
-                agentRewardITI = removeExample(agentRewardITI, redundantTrial)
+                agentRewardITI = agentRewardITI.copy(first = removeExample(agentRewardITI.first, redundantTrial, agentRewardITI.second))
             }
 
             existRewardStates.add(rewardTrial)
 
             // Consistency Check
-            val solvableReward = unfactoredReward(agentRewardITI.vocab.toList() , existRewardStates)
+            val solvableReward = unfactoredReward(agentRewardITI.second.vocab.toList() , existRewardStates)
             if(solvableReward == null){
-                val newRewardVars = whatsInRewardScope(agentRewardITI.vocab, expert)
+                val newRewardVars = whatsInRewardScope(agentRewardITI.second.vocab, expert)
                 tStep += 1
-                agentRewardITI = addAdditionalVocab(agentRewardITI, newRewardVars)
                 agentVocab += newRewardVars
+                agentRewardITI = changeAllowedVocab(agentRewardITI, agentVocab)
             }
 
-            agentRewardITI = incrementalUpdate(agentRewardITI, Trial(projectedNewState, reward))
-            agentRewardDT = convertFromITI(agentRewardITI)
+            agentRewardITI = agentRewardITI.copy(first = incrementalUpdate(agentRewardITI.first, listOf(Trial(projectedNewState, reward)), agentRewardITI.second))
+            agentRewardDT = convertFromITI(agentRewardITI.first)
         }
 
         if(oldVocab != agentVocab){
@@ -135,26 +135,26 @@ fun main(args : Array<String>){
 }
 
 
-private fun cptsITIToDBNs(bestPInfos: Map<Action, Map<RandomVariable, SeqPInfo>>, cptsITI: Map<Action, Map<RandomVariable, ProbTreeITI>>, pseudoCountSize: Double): MutableMap<String, DynamicBayesNet> {
+private fun cptsITIToDBNs(bestPInfos: Map<Action, Map<RandomVariable, SeqPInfo>>, cptsITI: Map<Action, Map<RandomVariable, ProbTree>>, pseudoCountSize: Double): MutableMap<String, DynamicBayesNet> {
     return cptsITI
         .mapValues { (a, cpts) -> cptsITIToDBN(bestPInfos[a]!!, cpts, pseudoCountSize) }
         .toMutableMap()
 }
 
-fun cptsITIToDBN(bestPInfos : Map<RandomVariable, SeqPInfo>, cptsITI: Map<RandomVariable, ProbTreeITI>, pseudoCountSize: Double) =
-    cptsITI.mapValues { (rv, dt) -> convertToCPT(dt, bestPInfos[rv]!!.priorParams, pseudoCountSize)}
+fun cptsITIToDBN(bestPInfos : Map<RandomVariable, SeqPInfo>, cptsITI: Map<RandomVariable, ProbTree>, pseudoCountSize: Double) =
+    cptsITI.mapValues { (rv, pt) -> convertToCPT(rv, pt.first, bestPInfos[rv]!!.priorParams, pseudoCountSize)}
 
 private fun initialCPTsITI(agentActions: MutableSet<String>, agentVocab: Set<RandomVariable>,
                            bestPInfos: MutableMap<Action, Map<RandomVariable, SeqPInfo>>,
-                           priorDBNs: MutableMap<String, DynamicBayesNet>, pseudoCountSize: Double): MutableMap<Action, Map<RandomVariable, ProbTreeITI>> =
+                           priorDBNs: MutableMap<String, DynamicBayesNet>, pseudoCountSize: Double): MutableMap<Action, Map<RandomVariable, ProbTree>> =
     agentActions
         .associate { Pair(it, initialCPTsITI(agentVocab, bestPInfos[it]!!, priorDBNs[it]!!, pseudoCountSize)) }
         .toMutableMap()
 
-fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPInfos: Map<RandomVariable, SeqPInfo>, priorDBN: DynamicBayesNet, pseudoCountSize: Double): Map<RandomVariable, ProbTreeITI> =
+fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPInfos: Map<RandomVariable, SeqPInfo>, priorDBN: DynamicBayesNet, pseudoCountSize: Double): Map<RandomVariable, ProbTree> =
     agentVocab.associate { rv ->
         val bestPSet = bestPInfos[rv]!!.parentSet
-        Pair(rv, ProbTreeITI(rv, bestPSet, priorDBN[rv]!!, pseudoCountSize))
+        Pair(rv, emptyProbTree(rv, bestPSet, priorDBN[rv]!!, pseudoCountSize, 0.7))
     }
 
 fun initialPSetPriors(actions : Set<Action>, beliefVocab : Set<RandomVariable>, singleParentProb : Double) =
@@ -167,44 +167,7 @@ fun initialPSetPriors(beliefVocab: Set<RandomVariable>, singleParentProb: Double
         Pair(rv, minParentsPrior(beliefVocab, singleParentProb))
     }
 
-data class ParentExtResult(val logPriors : Map<RandomVariable, LogPrior<PSet>>, val reasonableParents : Map<RandomVariable, List<SeqPInfo>>)
-
-fun posteriorToPrior(reasonableParents : Map<RandomVariable, List<SeqPInfo>>, oldVocab : Set<RandomVariable>, extraVocab : Set<RandomVariable>, prevJointPriorParams: Map<RandomVariable, DecisionTree<Factor>>,
-                     singleParentProb : Double, aliveThresh : Double, priorSampleSize : Double) : ParentExtResult {
-    val inReasonable = Math.log(0.99)
-    val outReasonable = Math.log(0.01)
-    val totalPsets = numAssignments(oldVocab + extraVocab)
-
-    val priorMaps = reasonableParents.mapValues { (_, rps) ->
-        rps.flatMap { oldPInfo ->
-            Sets.powerSet(extraVocab).map { extraSubset : Set<RandomVariable> ->
-                val pSet = oldPInfo.parentSet + extraSubset
-                val logProb = extraSubset.size * Math.log(singleParentProb) + (extraVocab.size - extraSubset.size) * Math.log(1 - singleParentProb) + oldPInfo.logProbability
-                Pair(pSet, logProb)
-            }
-        }.associate{ it }
-    }
-
-    val priorFuncs : Map<RandomVariable, LogPrior<PSet>> = priorMaps.mapValues{ (_, priorMap) ->
-        { pSet : PSet ->
-            if(pSet in priorMap){
-                inReasonable + priorMap[pSet]!!
-            }
-            else{
-                outReasonable + 1.0 / (totalPsets - priorMap.size)
-            }
-        }
-    }
-
-    val bestPSetScores = priorMaps.mapValues { (_, rps) -> rps.values.max() }
-
-    val newReasonable = priorMaps.mapValues { (rv, rps) ->
-        rps.filterValues { it < bestPSetScores[rv]!! * aliveThresh }
-            .map { (pSet, _) ->  createPInfo(rv, pSet, emptyList(), priorFuncs[rv]!!, prevJointPriorParams[rv]!!, priorSampleSize, emptyList())}
-    }
-
-    return ParentExtResult(priorFuncs, newReasonable)
-}
+data class ParentExtResult(val logPriors : Map<RandomVariable, LogPrior<PSet>>, val reasonableParents : Map<RandomVariable, List<PSet>>)
 
 fun eGreedy(actions : Set<Action>, exploitPolicy : PolicyTree, state : RVAssignment, exploreAmount : Double) : Action =
     if(Math.random() < 1 - exploreAmount) matchLeaf(exploitPolicy, state).value else actions.random()

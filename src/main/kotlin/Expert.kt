@@ -5,7 +5,7 @@ data class Expert(
     val historyWindow: Int,
     val mistakeProportion: Double,
     val adviceInterval : Int,
-    val knownAgentVocab : HashSet<RandomVariable>,
+    val knownAgentVocab : MutableSet<RandomVariable>,
     val problemMDP : MDP,
     val qFuncs: Map<Action, QTree>
 ){
@@ -17,6 +17,10 @@ data class Expert(
 fun whatsInRewardScope(knownScope : Set<RandomVariable>, expert : Expert) : Set<RandomVariable>{
     // Give them all the knownVocab extra scope, but also add in one extra from the unknown vocab if you want
     val extraScope = expert.problemMDP.rewardScope - knownScope
+    if (extraScope.isEmpty()){
+        throw IllegalArgumentException("Agent is asking for reward scope when it knows full scope")
+    }
+
     val (inVocab, outVocab) = extraScope.partition { it in expert.knownAgentVocab }
 
     val scopeAdvice = (if(outVocab.isNotEmpty()) inVocab + outVocab.random() else inVocab).toSet()
@@ -59,6 +63,10 @@ fun resolveMisunderstanding(t1: TimeStamp, t2: TimeStamp, expert: Expert) : Misu
     if(project(state1, expert.knownAgentVocab) != project(state2, expert.knownAgentVocab)){
         throw IllegalArgumentException("Agent is asking about conflict between two trials which it should see as different")
     }
+    if(state1 == state2){
+        throw IllegalArgumentException("Agent has observed conflict between two identical states?")
+    }
+
     // Then, pick a variable not in known agent vocab such that the assignment value is different in each of the two stateHist
     val possibleAnswers = state1.keys.filter { rv -> state1[rv]!! != state2[rv]!! }
     val newRV = possibleAnswers.random()
@@ -67,6 +75,7 @@ fun resolveMisunderstanding(t1: TimeStamp, t2: TimeStamp, expert: Expert) : Misu
 }
 
 // Reveals a variable which this variable is a parent of (maybe it should also reveal if it is in the reward domain?)
+/*
 fun whatEffect(rv : RandomVariable, expert: Expert) : Pair<Action, RandomVariable> {
     for((action, dbn) in expert.problemMDP.dbnStructs){
         val rvChildren : PSet = parentMapToChildMap(dbn)[rv]!!
@@ -85,3 +94,4 @@ fun whatEffect(rv : RandomVariable, expert: Expert) : Pair<Action, RandomVariabl
 
     throw NotImplementedError("If rv has no children in any dbn, it might be a reward scope var. Implementation does not yet account for this possibility")
 }
+*/

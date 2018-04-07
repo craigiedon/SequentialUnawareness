@@ -38,40 +38,40 @@ typealias DynamicBayesNet = Map<RandomVariable, DecisionTree<Factor>>
 
 // Note, this assumes that all the random variables in your problem are binary, so conversion from binary test to assignments is trivial.
 // To handle many values RVs, we will have to do something a bit more complicated
-fun convertFromITI(binaryRTree : RewardTree) : DecisionTree<Reward> =
+fun convertFromITI(binaryRTree : RewardNode) : DecisionTree<Reward> =
     when(binaryRTree){
         is RLeaf -> {
-            val averageReward = if(binaryRTree.trials.isEmpty()){
+            val averageReward = if(binaryRTree.examples.isEmpty()){
                 0.0
             }
             else{
-                binaryRTree.trials.map { it.reward }.average()
+                binaryRTree.examples.map { it.reward }.average()
             }
             DTLeaf(averageReward)
 
         } // This would be quicker if these stats had been pre-computed at leaf
         is RDecision -> {
-            val orderedBranches = if(binaryRTree.bestTest.second == 0){
+            val orderedBranches = if(binaryRTree.currentTest.second == 0){
                 listOf(binaryRTree.passBranch, binaryRTree.failBranch)
             }
             else{
                 listOf(binaryRTree.failBranch, binaryRTree.passBranch)
             }
-            DTDecision(binaryRTree.bestTest.first, orderedBranches.map(::convertFromITI))
+            DTDecision(binaryRTree.currentTest.first, orderedBranches.map(::convertFromITI))
         }
     }
 
-fun convertToCPT(binaryPTree: ProbTree, priorParams: Map<RVAssignment, Factor>, pseudoCountStrength: Double, assignmentSoFar: RVAssignment = emptyMap()) : DecisionTree<Factor> =
+fun convertToCPT(rv : RandomVariable, binaryPTree: ProbNode, priorParams: Map<RVAssignment, Factor>, pseudoCountStrength: Double, assignmentSoFar: RVAssignment = emptyMap()) : DecisionTree<Factor> =
     when(binaryPTree){
-        is PLeaf -> {
+        is ITILeaf -> {
             val matchingFactors = matchingAssignments(assignmentSoFar, priorParams)
             // Add matching factors together using factor function used in create p info
             val relevantPrior = add(matchingFactors)
-            val bestParams = maxPosteriorParams(binaryPTree.rv, binaryPTree.counts, relevantPrior, pseudoCountStrength)
+            val bestParams = maxPosteriorParams(rv, binaryPTree.counts, relevantPrior, pseudoCountStrength)
             DTLeaf(bestParams)
         }
-        is PDecision -> {
-            if(binaryPTree.rv.domainSize != 2){
+        is ITIDecision -> {
+            if(rv.domainSize != 2){
                 throw NotImplementedError("Can't yet handle non-binary variables")
             }
             val orderedBranches = if(binaryPTree.currentTest.second == 0){
@@ -80,7 +80,7 @@ fun convertToCPT(binaryPTree: ProbTree, priorParams: Map<RVAssignment, Factor>, 
             else{
                 listOf(binaryPTree.failBranch, binaryPTree.passBranch)
             }
-            DTDecision(binaryPTree.rv, orderedBranches.mapIndexed { i, branch -> convertToCPT(branch, priorParams, pseudoCountStrength, assignmentSoFar + Pair(binaryPTree.currentTest.first, i))} )
+            DTDecision(rv, orderedBranches.mapIndexed { i, branch -> convertToCPT(rv, branch, priorParams, pseudoCountStrength, assignmentSoFar + Pair(binaryPTree.currentTest.first, i))} )
         }
     }
 
@@ -108,25 +108,25 @@ fun jointQuery(parentAssgn : RVAssignment, jointDT: DecisionTree<Factor>) : Fact
     return jointQueryRec(jointDT, emptyMap())
 }
 
-fun convertToJointProbTree(binaryPTree : ProbTree, priorJointDT: DecisionTree<Factor>, psuedoCountStrength : Double) : DecisionTree<Factor> {
+fun convertToJointProbTree(rv : RandomVariable, binaryPTree : ProbNode, priorJointDT: DecisionTree<Factor>, psuedoCountStrength : Double) : DecisionTree<Factor> {
     val totalTrials = when(binaryPTree){
-        is PLeaf -> binaryPTree.trials.size
+        is PLeaf -> binaryPTree.examples.size
         is PDecision -> {
             val testStat = binaryPTree.testCandidates[binaryPTree.currentTest]!!
             testStat.passTrialCounts.values.sum() + testStat.failTrialCounts.values.sum()
         }
     }
 
-    fun convertToJointProbTreeRec(pt : ProbTree, parentAssgn: RVAssignment) :DecisionTree<Factor> =
+    fun convertToJointProbTreeRec(pt : ProbNode, parentAssgn: RVAssignment) :DecisionTree<Factor> =
         when(pt){
-            is PLeaf -> {
+            is ITILeaf -> {
                 val jointPriorParam = jointQuery(parentAssgn, priorJointDT)
-                val realCounts = pt.rv.domain.map { (pt.counts[it] ?: 0)}
-                val scaledCombined = pt.rv.domain.map { (realCounts[it] + (jointPriorParam.values[it] * psuedoCountStrength)) / (totalTrials + psuedoCountStrength)}
-                DTLeaf(Factor(listOf(pt.rv), scaledCombined))
+                val realCounts = rv.domain.indices.map { (pt.counts[it] ?: 0)}
+                val scaledCombined = rv.domain.indices.map { (realCounts[it] + (jointPriorParam.values[it] * psuedoCountStrength)) / (totalTrials + psuedoCountStrength)}
+                DTLeaf(Factor(listOf(rv), scaledCombined))
             }
-            is PDecision -> {
-                if(pt.rv.domainSize != 2){
+            is ITIDecision -> {
+                if(rv.domainSize != 2){
                     throw NotImplementedError("Can't yet handle non-binary variables")
                 }
                 val orderedBranches = if(pt.currentTest.second == 0){
@@ -135,7 +135,7 @@ fun convertToJointProbTree(binaryPTree : ProbTree, priorJointDT: DecisionTree<Fa
                 else{
                     listOf(pt.failBranch, pt.passBranch)
                 }
-                DTDecision(pt.rv, orderedBranches.mapIndexed { i, branch -> convertToJointProbTreeRec(branch, parentAssgn + Pair(pt.rv, i)) })
+                DTDecision(rv, orderedBranches.mapIndexed { i, branch -> convertToJointProbTreeRec(branch, parentAssgn + Pair(rv, i)) })
             }
         }
     return convertToJointProbTreeRec(binaryPTree, emptyMap())
@@ -159,9 +159,9 @@ fun partialMatch(partialAssignment: RVAssignment, fullAssignment : RVAssignment)
     partialAssignment == fullAssignment.filterKeys { it in partialAssignment.keys }
 
 fun maxPosteriorParams(rv : RandomVariable, counts : Map<Int, Int>, priorParams : Factor, pseudoCountStrength : Double) : Factor{
-    val totalCounts = rv.domain.sumBy { counts[it] ?: 0}
-    val totalPseudoCounts = rv.domain.sumByDouble { priorParams.values[it] * pseudoCountStrength }
-    val bestParams = rv.domain.map { rvVal -> ((counts[rvVal] ?: 0) + priorParams.values[rvVal] * pseudoCountStrength) / (totalCounts + totalPseudoCounts) }
+    val totalCounts = rv.domain.indices.sumBy { counts[it] ?: 0}
+    val totalPseudoCounts = rv.domain.indices.sumByDouble { priorParams.values[it] * pseudoCountStrength }
+    val bestParams = rv.domain.indices.map { rvVal -> ((counts[rvVal] ?: 0) + priorParams.values[rvVal] * pseudoCountStrength) / (totalCounts + totalPseudoCounts) }
     return Factor(listOf(rv), bestParams)
 }
 
@@ -302,21 +302,24 @@ fun <T> matchAllLeaves(dTree : DecisionTree<T>, partialContext : RVAssignment) :
         }
     }
 
-fun uniStartIdentityTransition(rv : RandomVariable, noise : Double = 0.0) : DTDecision<Factor> =
-    DTDecision(rv, rv.domain.map { prevValue ->
+fun unifStartIDTransJoint(vocab : Collection<RandomVariable>, noise : Double = 0.0) =
+    vocab.associate { Pair(it, unifStartIDTransJoint(it, noise)) }
+
+fun unifStartIDTransJoint(rv : RandomVariable, noise : Double = 0.0) : DTDecision<Factor> =
+    DTDecision(rv, rv.domain.indices.map { prevValue ->
         val condFac = detFactor(rv, prevValue, noise)
         val jointFac =  Factor(condFac.scope, condFac.values.map { it / rv.domainSize })
         DTLeaf(jointFac)
     })
 
 fun identityTransition(rv : RandomVariable, noise : Double = 0.0) : DTDecision<Factor> =
-    DTDecision(rv, rv.domain.map { prevValue ->  DTLeaf(detFactor(rv, prevValue, noise))})
+    DTDecision(rv, rv.domain.indices.map { prevValue ->  DTLeaf(detFactor(rv, prevValue, noise))})
 
 fun detFactor(rv : RandomVariable, value : Int, noise: Double = 0.0) : Factor {
     if(noise < 0 || noise > 1){
         throw IllegalArgumentException("Noise val must be between 0 and 1")
     }
-    return Factor(listOf(rv), rv.domain.map { if(it == value) (1 - noise) + (noise * (1.0 / rv.domainSize))  else noise * (1.0 / rv.domainSize)})
+    return Factor(listOf(rv), rv.domain.indices.map { if(it == value) (1 - noise) + (noise * (1.0 / rv.domainSize))  else noise * (1.0 / rv.domainSize)})
 }
 
 fun pRegress(valTree : DecisionTree<Double>, dbn : DynamicBayesNet) : DecisionTree<NaiveFactors>{
@@ -328,7 +331,7 @@ fun pRegress(valTree : DecisionTree<Double>, dbn : DynamicBayesNet) : DecisionTr
     val dbnCPDTree = dbn[rootVar]!!
 
     // Step 3: For values of the root variable that occur with some positive probability
-    val subTrees = rootVar.domain.map{ rootDecision.branches[it]}
+    val subTrees = rootVar.domain.indices.map{ rootDecision.branches[it]}
     val subPTrees = subTrees.map { pRegress(it, dbn) }
 
     // Step 4: Loop over every leaf in cpd tree for root variable

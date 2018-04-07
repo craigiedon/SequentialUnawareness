@@ -1,14 +1,17 @@
 import Utils.allEqual
 import Utils.map
+import Utils.merge
 import org.apache.commons.math3.special.Gamma
 
 data class SequentialTrial(val prevState : RVAssignment, val action : Action, val currentState : RVAssignment, val reward : Double)
 
-interface ITITree<T, C>{
-    fun incrementalUpdate(examples: List<T>) : ITITree<T, C>
-    fun changeAllowedVocab(allowedVocab : Set<RandomVariable>) : ITITree<T, C>
-    val rootNode : ITINode<T,C>
-}
+data class ITIUpdateConfig<in T, C>(
+    val exampleToClass : (T) -> C,
+    val testChecker : (RVTest, T) -> Boolean,
+    val scoreFunc : (RVAssignment, Map<C, Int>) -> Double,
+    val splitThresh : Double,
+    val vocab : Set<RandomVariable>
+)
 
 sealed class ITINode<T, C>{
     abstract val branchLabel : RVAssignment
@@ -32,82 +35,114 @@ data class ITIDecision<T, C>(
     override val stale : Boolean
 ) : ITINode<T, C>()
 
+typealias ITITree<T,C> = Pair<ITINode<T,C>, ITIUpdateConfig<T,C>>
+
+typealias RVTest = Pair<RandomVariable, Int>
+data class TestStats<C>(val rv : RandomVariable, val testVal : Int, val passTrialCounts : MutableMap<C, Int>, val failTrialCounts : MutableMap<C, Int>)
+
+typealias ProbTree = ITITree<SequentialTrial, Int>
 typealias ProbNode = ITINode<SequentialTrial, Int>
 typealias PLeaf = ITILeaf<SequentialTrial, Int>
 typealias PDecision = ITIDecision<SequentialTrial, Int>
 
-data class ProbTreeITI(val rv : RandomVariable, val vocab : Set<RandomVariable>, val jointParamPrior : DecisionTree<Factor>, val pseudoCountSize : Double, var root: ProbNode? = null) : ITITree<SequentialTrial, Int>{
+fun probTreeConfig(rv : RandomVariable, vocab : Set<RandomVariable>, jointParamPrior : DecisionTree<Factor>, pseudoCountSize : Double, splitThresh : Double) =
+    ITIUpdateConfig<SequentialTrial, Int>(
+        { example -> example.currentState[rv]!! },
+        { rvTest, example -> example.prevState[rvTest.first] == rvTest.second },
+        { branchLabel, counts -> BDeScore(rv, counts, branchLabel, jointParamPrior, pseudoCountSize)},
+        splitThresh,
+        vocab
+    )
 
-    fun exampleToClass(example : SequentialTrial) = example.currentState[rv]!!
-    fun testChecker(rvTest: RVTest, example : SequentialTrial) = example.prevState[rvTest.first] == rvTest.second
-    fun scoreFunc(partialAssignment: RVAssignment, classCounts : Map<Int, Int>) = BDeScore(rv, classCounts, partialAssignment, jointParamPrior, pseudoCountSize)
-    val splitThresh = 0.7
+typealias RewardTree = ITITree<Trial, Double>
+typealias RewardNode = ITINode<Trial, Double>
+typealias RLeaf = ITILeaf<Trial, Double>
+typealias RDecision = ITIDecision<Trial, Double>
 
-    init{
-        if(root == null){
-            val emptyRoot = PLeaf(emptyMap(), createStats(vocab, emptyList(), this::testChecker, this::exampleToClass), emptyList(), HashMap(), stale = true)
-            root = ensureBestTest(emptyRoot, vocab, this::scoreFunc, splitThresh, this::testChecker, this::exampleToClass)
-        }
-    }
+fun rewardTreeConfig(vocab : Set<RandomVariable>) =
+    ITIUpdateConfig<Trial, Reward>(
+        { it.reward },
+        { rvTest, example -> example.assignment[rvTest.first] == rvTest.second } ,
+        { _ , counts -> weightedNegativeEntropy(counts) },
+        0.0,
+        vocab
+    )
 
-    override fun changeAllowedVocab(allowedVocab: Set<RandomVariable>) : ProbTreeITI{
-        fun changeAllowedVocabRec(pt : ProbNode, allowedVocab: Set<RandomVariable>) : ProbNode{
-            if(vocab == allowedVocab){
-                return pt
-            }
-            val additionalVars = allowedVocab - vocab
-            val filteredTests = pt.testCandidates.filterKeys{ it.first in allowedVocab }
-            when(pt){
-                is PLeaf -> {
-                    val additionalTests = createStats(additionalVars, pt.examples, this::testChecker, this::exampleToClass)
-                    val updatedTests = filteredTests + additionalTests
-                    return pt.copy(testCandidates = updatedTests)
-                }
-                is PDecision -> {
-                    val newPassBranch = changeAllowedVocabRec(pt.passBranch, allowedVocab)
-                    val newFailBranch = changeAllowedVocabRec(pt.failBranch, allowedVocab)
-                    if(additionalVars.isEmpty() && pt.currentTest.first in allowedVocab){
-                        return pt.copy(testCandidates = filteredTests,  passBranch = newPassBranch, failBranch = newFailBranch)
-                    }
-                    val extraPassTests = newPassBranch.testCandidates.filterKeys { it.first in additionalVars }
-                    val extraFailTests = newFailBranch.testCandidates.filterKeys { it.first in additionalVars }
-                    val additionalTests = mergeTests(extraPassTests, extraFailTests)
-                    return pt.copy(testCandidates = filteredTests + additionalTests,  passBranch = newPassBranch, failBranch = newFailBranch, stale = true)
-                }
-            }
-        }
-        return this.copy(vocab = allowedVocab, root = changeAllowedVocabRec(root!!, allowedVocab))
-    }
-
-    override val rootNode get() = root!!
-
-    override fun incrementalUpdate(examples : List<SequentialTrial>): ProbTreeITI {
-        val exampleAddedTree = addExamples(root!!, examples, this::exampleToClass, this::testChecker)
-        val testUpdatedNode = ensureBestTest(exampleAddedTree, this.vocab, this::scoreFunc, splitThresh, this::testChecker, this::exampleToClass)
-        return this.copy(root = testUpdatedNode)
-    }
-
+fun emptyRewardTree(vocab : Set<RandomVariable>) : RewardTree {
+    val config = rewardTreeConfig(vocab)
+    return Pair(emptyNode(config), config)
 }
 
-fun <T, C> addExamples(pTree: ITINode<T,C>, examples: List<T>, classExtractor : (T) -> C, testChecker : (RVTest, T) -> Boolean) : ITINode<T, C> {
-    when(pTree){
+fun emptyProbTree(rv : RandomVariable, vocab : Set<RandomVariable>, jointParamPrior : DecisionTree<Factor>, pseudoCountSize : Double, splitThresh : Double) : ProbTree {
+    val config = probTreeConfig(rv, vocab, jointParamPrior, pseudoCountSize, splitThresh)
+    return Pair(emptyNode(config), config)
+}
+
+fun <T, C> emptyNode(itiUpdateConfig: ITIUpdateConfig<T, C>) : ITINode<T, C>{
+    val emptyLeaf = ITILeaf<T, C>(emptyMap(), createStats(itiUpdateConfig.vocab, emptyList(), itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass), emptyList(), HashMap<C, Int>(), true)
+    return ensureBestTest(emptyLeaf, itiUpdateConfig.vocab, itiUpdateConfig.scoreFunc, itiUpdateConfig.splitThresh, itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass)
+}
+
+fun <T, C> incrementalUpdate(dt : ITINode<T, C>, examples : List<T>, itiUpdateConfig: ITIUpdateConfig<T, C>): ITINode<T, C> {
+    val exampleAddedTree = addExamples(dt, examples, itiUpdateConfig.exampleToClass, itiUpdateConfig.testChecker)
+    val testUpdatedNode = ensureBestTest(exampleAddedTree, itiUpdateConfig.vocab, itiUpdateConfig.scoreFunc, itiUpdateConfig.splitThresh, itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass)
+    return testUpdatedNode
+}
+
+fun <T, C> changeAllowedVocab(itiTree : ITITree<T, C>, allowedVocab: Set<RandomVariable>) : ITITree<T, C> {
+    fun changeAllowedVocabRec(node : ITINode<T,C>, allowedVocab: Set<RandomVariable>) : ITINode<T,C>{
+        if(itiTree.second.vocab == allowedVocab){
+            return node
+        }
+        val additionalVars = allowedVocab - itiTree.second.vocab
+        val filteredTests = node.testCandidates.filterKeys{ it.first in allowedVocab }
+        when(node){
+            is ITILeaf -> {
+                val additionalTests = createStats(additionalVars, node.examples, itiTree.second.testChecker, itiTree.second.exampleToClass)
+                val updatedTests = filteredTests + additionalTests
+                return node.copy(testCandidates = updatedTests)
+            }
+            is ITIDecision -> {
+                val newPassBranch = changeAllowedVocabRec(node.passBranch, allowedVocab)
+                val newFailBranch = changeAllowedVocabRec(node.failBranch, allowedVocab)
+                if(additionalVars.isEmpty() && node.currentTest.first in allowedVocab){
+                    return node.copy(testCandidates = filteredTests,  passBranch = newPassBranch, failBranch = newFailBranch)
+                }
+                val extraPassTests = newPassBranch.testCandidates.filterKeys { it.first in additionalVars }
+                val extraFailTests = newFailBranch.testCandidates.filterKeys { it.first in additionalVars }
+                val additionalTests = mergeTests(extraPassTests, extraFailTests)
+                return node.copy(testCandidates = filteredTests + additionalTests,  passBranch = newPassBranch, failBranch = newFailBranch, stale = true)
+            }
+        }
+    }
+    return Pair(changeAllowedVocabRec(itiTree.first, allowedVocab), itiTree.second.copy(vocab = allowedVocab))
+}
+
+fun <T, C> addExamples(dt : ITINode<T,C>, examples : List<T>, config: ITIUpdateConfig<T,C>) =
+    addExamples(dt, examples, config.exampleToClass, config.testChecker)
+
+fun <T, C> addExamples(itiNode: ITINode<T,C>, examples: List<T>, classExtractor : (T) -> C, testChecker : (RVTest, T) -> Boolean) : ITINode<T, C> {
+    if(examples.isEmpty()){
+        return itiNode
+    }
+
+    when(itiNode){
         is ITILeaf -> {
             // Update Counts
             for (example in examples) {
                 val classLabel = classExtractor(example)
-                val oldVal : Int = pTree.counts.getOrDefault(classLabel, 0)
-                pTree.counts[classLabel] = oldVal + 1
+                val oldVal : Int = itiNode.counts.getOrDefault(classLabel, 0)
+                itiNode.counts[classLabel] = oldVal + 1
             }
-            pTree.testCandidates.forEach { _, testStat -> addTrials(testStat, examples, testChecker, classExtractor) }
-            return pTree.copy(stale = true)
-            //return attemptSplit(pTree, vocab, testChecker, classExtractor, scoreFunc, splitThresh)
+            itiNode.testCandidates.forEach { _, testStat -> addTrials(testStat, examples, testChecker, classExtractor) }
+            return itiNode.copy(examples = itiNode.examples + examples, stale = true)
         }
         is ITIDecision -> {
-            val (passTrials, failTrials) = examples.partition { testChecker(pTree.currentTest, it) }
-            val newPass = addExamples(pTree.passBranch, passTrials, classExtractor, testChecker)
-            val newFail = addExamples(pTree.failBranch, failTrials, classExtractor, testChecker)
+            val (passTrials, failTrials) = examples.partition { testChecker(itiNode.currentTest, it) }
+            val newPass = addExamples(itiNode.passBranch, passTrials, classExtractor, testChecker)
+            val newFail = addExamples(itiNode.failBranch, failTrials, classExtractor, testChecker)
 
-            val updatedDT = pTree.copy(passBranch = newPass, failBranch = newFail, stale = true)
+            val updatedDT = itiNode.copy(passBranch = newPass, failBranch = newFail, stale = true)
             updatedDT.testCandidates.forEach { (_, stat) -> addTrials(stat, examples, testChecker, classExtractor) }
             return  updatedDT
         }
@@ -115,7 +150,7 @@ fun <T, C> addExamples(pTree: ITINode<T,C>, examples: List<T>, classExtractor : 
 }
 
 fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, scoreFunc: (RVAssignment, Map<C, Int>) -> Double, scoreThresh : Double, testChecker : (RVTest, T) -> Boolean, classExtractor: (T) -> C) : ITINode<T,C>{
-    if(dt.stale){
+    if(dt.stale && dt.testCandidates.isNotEmpty()){
         val testScores = dt.testCandidates.mapValues{ (_, testStat) ->
             scoreFunc(dt.branchLabel + Pair(testStat.rv, testStat.testVal), testStat.passTrialCounts) +
             scoreFunc(dt.branchLabel + Pair(testStat.rv, 1 - testStat.testVal), testStat.failTrialCounts)
@@ -136,10 +171,10 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, scoreF
             }
             is ITILeaf -> {
                 val currentScore = scoreFunc(dt.branchLabel, dt.counts)
-                if(bestScore - currentScore > scoreThresh){
+                if(bestScore - currentScore > scoreThresh) {
                     val (passTrials, failTrials) = dt.examples.partition { testChecker(bestTest, it) }
                     val passLeaf = ITILeaf(dt.branchLabel + bestTest, createStats(vocab, passTrials, testChecker, classExtractor), passTrials, dt.testCandidates[bestTest]!!.passTrialCounts, true)
-                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest.first, 1 - bestTest.second), createStats(vocab, passTrials, testChecker, classExtractor), failTrials, dt.testCandidates[bestTest]!!.failTrialCounts, true)
+                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest.first, 1 - bestTest.second), createStats(vocab, failTrials, testChecker, classExtractor), failTrials, dt.testCandidates[bestTest]!!.failTrialCounts, true)
                     return ITIDecision(
                         dt.branchLabel,
                         dt.testCandidates,
@@ -148,6 +183,9 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, scoreF
                         ensureBestTest(failLeaf, vocab, scoreFunc, scoreThresh, testChecker, classExtractor),
                         false
                     )
+                }
+                else{
+                    return dt.copy(stale = false)
                 }
             }
         }
@@ -181,11 +219,12 @@ fun <T, C> transposeTree(dt : ITIDecision<T,C>,
         return dt.copy(currentTest = replacementTest, passBranch = newPassBranch, failBranch = newFailBranch)
     }
     if( transposedPass is ITIDecision && transposedFail is ITILeaf) {
-        return addExamples(transposedPass.copy(branchLabel = dt.branchLabel), transposedFail.examples, classExtractor, testChecker) as ITIDecision<T, C>
+
+        return addExamples(removeLabel(transposedPass, rootTest.first), transposedFail.examples, classExtractor, testChecker) as ITIDecision<T, C>
     }
 
     if(transposedFail is ITIDecision && transposedPass is ITILeaf){
-        return addExamples(transposedFail.copy(branchLabel = dt.branchLabel), transposedPass.examples, classExtractor, testChecker) as ITIDecision<T, C>
+        return addExamples(removeLabel(transposedFail, rootTest.first), transposedPass.examples, classExtractor, testChecker) as ITIDecision<T, C>
     }
     if(transposedPass is ITILeaf && transposedFail is ITILeaf){
         val (newPassTrials, newFailTrials) = (transposedPass.examples + transposedFail.examples).partition { testChecker(replacementTest, it) }
@@ -207,12 +246,28 @@ fun <T, C> transposeTree(dt : ITIDecision<T,C>,
     throw IllegalStateException("All type cases should be covered, how did you get here?")
 }
 
+fun <T, C> removeLabel(itiNode: ITINode<T, C>, testVar : RandomVariable) : ITINode<T, C> =
+    when(itiNode){
+        is ITILeaf -> itiNode.copy(branchLabel = itiNode.branchLabel - testVar)
+        is ITIDecision -> itiNode.copy(branchLabel = itiNode.branchLabel - testVar, passBranch = removeLabel(itiNode.passBranch, testVar), failBranch = removeLabel(itiNode.failBranch, testVar))
+    }
+
 fun <T, C> mergeTests(p1 : ITINode<T,C>, p2 : ITINode<T, C>) =
     mergeTests(p1.testCandidates, p2.testCandidates)
 
+fun <T> mergeTests(t1Stats: Map<RVTest, TestStats<T>>, t2Stats: Map<RVTest, TestStats<T>>) =
+    merge(t1Stats, t2Stats, { (rv1, tVal1, passCounts1, failCounts1), (_, _, passCounts2, failCounts2) ->
+        TestStats(rv1, tVal1,
+            merge(passCounts1, passCounts2, Int::plus),
+            merge(failCounts1, failCounts2, Int::plus))
+    })
+
+fun <T, C> createStats(examples : List<T>, itiUpdateConfig: ITIUpdateConfig<T, C>) =
+    createStats(itiUpdateConfig.vocab, examples, itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass)
+
 fun <T, C> createStats(testVocab : Collection<RandomVariable>, examples: List<T>, testChecker: (RVTest, T) -> Boolean, classExtractor: (T) -> C) =
     testVocab
-        .flatMap { testRV -> testRV.domain.map { testVal -> Pair(Pair(testRV, testVal), createStat(testRV, testVal, examples, testChecker, classExtractor)) } }
+        .flatMap { testRV -> testRV.domain.indices.map { testVal -> Pair(Pair(testRV, testVal), createStat(testRV, testVal, examples, testChecker, classExtractor)) } }
         .associate{ it }
 
 fun <T, C> createStat(testRV: RandomVariable, testVal : Int, examples : List<T>, testChecker: (RVTest, T) -> Boolean, classExtractor: (T) -> C) : TestStats<C> {
@@ -226,8 +281,14 @@ fun <T, C> createStat(testRV: RandomVariable, testVal : Int, examples : List<T>,
     return TestStats(testRV, testVal, passTrialCounts, failTrialCounts)
 }
 
+fun <T, C> classCounts(examples : List<T>, exampleToClass : (T) -> C) =
+    examples
+        .groupBy(exampleToClass)
+        .mapValues { it.value.size }
+        .toMutableMap()
 
-fun <T, C> addTrials(stat : TestStats<C>, examples: List<T>, testChecker: (RVTest, T) -> kotlin.Boolean, classExtractor: (T) -> C){
+
+fun <T, C> addTrials(stat : TestStats<C>, examples: List<T>, testChecker: (RVTest, T) -> Boolean, classExtractor: (T) -> C){
     examples.forEach {
         val passesTest = testChecker(Pair(stat.rv, stat.testVal), it)
         val classLabel = classExtractor(it)
@@ -248,14 +309,6 @@ fun BDeScore(rv : RandomVariable, counts : Map<Int, Int>, partialAssignment : RV
     return BDeScore(counts.toOrderedList(rv), priorFactor, pseudoSampleSize)
 }
 
-/*
-fun BDeScore(rv : RandomVariable, testStat : TestStats<Int>, partialAssignment: RVAssignment, jointParamPrior: DecisionTree<Factor>, pseudoSampleSize: Double) : Double {
-    val passPrior : Factor = jointQuery(partialAssignment + Pair(testStat.rv, testStat.testVal), jointParamPrior)
-    val failPrior : Factor = jointQuery(partialAssignment + Pair(testStat.rv, 1 - testStat.testVal), jointParamPrior)
-    return BDeScore(testStat.passTrialCounts.toOrderedList(rv), passPrior, pseudoSampleSize) + BDeScore(testStat.failTrialCounts.toOrderedList(rv), failPrior, pseudoSampleSize)
-}
-*/
-
 fun BDeScore(rv : RandomVariable, counts : Map<Int, Int>, pseudoSampleSize: Double) =
     BDeScore(counts.toOrderedList(rv), pseudoSampleSize = pseudoSampleSize)
 
@@ -265,7 +318,7 @@ fun BDeScore(counts: List<Int>, paramPrior: Factor? = null, pseudoSampleSize: Do
     val betaDenominatorArgs = ArrayList<Double>()
 
     for((childVal, count) in counts.withIndex()){
-        val pseudoCount = if(paramPrior != null) paramPrior.values[childVal] else (1.0 / counts.size) * pseudoSampleSize
+        val pseudoCount = (if(paramPrior != null) paramPrior.values[childVal] else (1.0 / counts.size)) * pseudoSampleSize
         betaNumeratorArgs.add(count + pseudoCount)
         betaDenominatorArgs.add(pseudoCount)
     }
@@ -317,4 +370,55 @@ fun logBeta(values: List<Double>): Double {
 }
 
 fun Map<Int,Int>.toOrderedList(rv : RandomVariable) =
-    rv.domain.map { this[it] ?: 0}
+    rv.domain.indices.map { this[it] ?: 0}
+
+fun weightedNegativeEntropy(counts : Map<Reward, Int>) : Double{
+    val total = counts.values.sum()
+    return -total * entropy(total, counts.values)
+}
+
+fun entropy(total : Int, splits : Collection<Int>) : Double{
+    if(total != splits.sum()){
+        throw IllegalArgumentException("Number of items in splits does not equal total")
+    }
+
+    return - splits.sumByDouble {
+        val proportion = it.toDouble() / total
+        proportion * Math.log(proportion)
+    }
+}
+
+fun <T, C> removeTrial(stat : TestStats<C>, example: T, testChecker: (RVTest, T) -> Boolean, classExtractor: (T) -> C){
+    val rvTest = Pair(stat.rv, stat.testVal)
+    val classLabel = classExtractor(example)
+    if(testChecker(rvTest, example)){
+        val oldCount = stat.passTrialCounts[classLabel] ?: throw IllegalArgumentException("Removing count, but there dont appear to be any!")
+        stat.passTrialCounts[classLabel] = oldCount - 1
+    }
+    else{
+        val oldCount = stat.failTrialCounts[classLabel] ?: throw IllegalArgumentException("Removing count, but there dont appear to be any!")
+        stat.failTrialCounts[classLabel] = oldCount - 1
+    }
+}
+
+fun <T, C> removeExample(dt : ITINode<T,C>, example: T, updateConfig : ITIUpdateConfig<T,C>) : ITINode<T,C> {
+    dt.testCandidates.forEach { _, stat -> removeTrial(stat, example, updateConfig.testChecker, updateConfig.exampleToClass) }
+
+    when(dt){
+        is ITILeaf -> {
+            if(example !in dt.examples){
+                IllegalArgumentException("Trying to remove example which is not present in tree")
+            }
+            val newExamples = dt.examples.filter { it != example }
+            return dt.copy(examples = newExamples)
+        }
+        is ITIDecision -> {
+            // If example passes test, it will be in the pass branch, if it fails, it will be in the fail branch
+            if(updateConfig.testChecker(dt.currentTest, example)){
+                return dt.copy(passBranch = removeExample(dt.passBranch, example, updateConfig), stale = true)
+            }
+
+            return dt.copy(failBranch = removeExample(dt.failBranch, example, updateConfig), stale = true)
+        }
+    }
+}

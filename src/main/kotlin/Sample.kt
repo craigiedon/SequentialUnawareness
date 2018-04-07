@@ -34,7 +34,7 @@ fun generateSample(sortedNodes : List<BNode>, prevAssignments : RVAssignment = e
 }
 
 fun generateSample(dbn : DynamicBayesNet, prevContext : RVAssignment) =
-    dbn.cpdTrees.mapValues{(_, cpdTree) ->
+    dbn.mapValues{(_, cpdTree) ->
         val matchingParam = matchLeaf(cpdTree, prevContext).value
         sample(matchingParam.values)
     }
@@ -72,7 +72,7 @@ fun genValueGivenParents(node : BNode, assignment: Map<RandomVariable, Int>) : I
 }
 
 fun sample(distribution : List<Double>) : Int{
-    if(!doubleEquality(distribution.sum(), 1.0, 10E-5)){
+    if(!doubleEquality(distribution.sum(), 1.0)){
         throw IllegalArgumentException("Probabilities must sum to 1")
     }
 

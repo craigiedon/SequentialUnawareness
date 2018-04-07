@@ -13,9 +13,11 @@ val L = RandomVariable("L", 2)
 val J = RandomVariable("J", 2)
 val H = RandomVariable("H", 2)
 
-data class RandomVariable(val name : String, val domainSize : Int, val varType : VarType = VarType.BELIEF){
+data class RandomVariable(val name : String, val domain : List<String>, val varType : VarType = VarType.BELIEF){
+    constructor(name : String, domainSize : Int, varType: VarType = VarType.BELIEF) : this(name, (0..domainSize - 1).map(Int::toString), varType)
+
     override fun toString() = name
-    val domain get() = (0..domainSize - 1).toList()
+    val domainSize : Int get() = domain.size
 }
 
 enum class VarType { BELIEF, ACTION, OUTCOME }

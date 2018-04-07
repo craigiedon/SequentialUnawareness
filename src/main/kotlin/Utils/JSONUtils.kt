@@ -1,3 +1,4 @@
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
@@ -17,4 +18,10 @@ fun saveToJson(logData : Any, outputFolder : String, fileName: String) {
 fun <T> loadJson(fileName : String, loadClass : Class<T>) : T {
     val mapper = jacksonObjectMapper().registerKotlinModule()
     return mapper.readValue(File(fileName), loadClass)
+}
+
+fun loadJsonTree(fileName : String) : JsonNode{
+    val mapper = jacksonObjectMapper().registerKotlinModule()
+    val node = mapper.readTree(File(fileName))
+    return node
 }
