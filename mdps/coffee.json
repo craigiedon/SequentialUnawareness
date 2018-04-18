@@ -404,5 +404,10 @@
         }
       }
     }
-  }
+  },
+  "terminalDescriptions": [
+    {
+      "huc": "yes"
+    }
+  ]
 }

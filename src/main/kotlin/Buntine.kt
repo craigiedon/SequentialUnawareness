@@ -39,6 +39,8 @@ data class DBNInfo(
     val vocab : Set<RandomVariable> get() = reasonableParents.keys
 }
 
+data class ParentExtResult(val logPriors : Map<RandomVariable, LogPrior<PSet>>, val reasonableParents : Map<RandomVariable, List<PSet>>)
+
 
 class BuntineUpdater(private val aliveThresh: Double, private val pseudoCountSize : Double, private val singleParentProb : Double) {
 
@@ -66,7 +68,7 @@ class BuntineUpdater(private val aliveThresh: Double, private val pseudoCountSiz
 
         val bestParents = bestParents(finalReasonableParents)
         val cptsITI = initialCPTsITI(oldVocab + newVars, bestParents, finalJointParamPrior, pseudoCountSize)
-        val dbn = oldVocabCPTs.mapValues { (rv, cpt) -> convertToCPT(rv, cpt.first, oldVocabBest[rv]!!.priorParams, pseudoCountSize) }
+        val dbn = oldVocabCPTs.mapValues { (rv, cpt) -> convertToCPT(rv, cpt.first, oldVocabUpdatedJointPriorParams[rv]!!, pseudoCountSize) }
 
         return DBNInfo(finalReasonableParents, bestParents, cptsITI, oldVocabUpdatedJointPriorParams, dbn, finalLogPriors, timeOfUpdate)
     }
@@ -77,13 +79,13 @@ class BuntineUpdater(private val aliveThresh: Double, private val pseudoCountSiz
         val reasonableParents = structuralUpdate(vocab, emptyList(), expertEv, pSetPriors, aliveThresh, priorJointParams, pseudoCountSize)
         val bestPInfos = bestParents(reasonableParents)
         val cptsITI = initialCPTsITI(vocab, bestPInfos, priorJointParams, pseudoCountSize)
-        val dbn = cptsITIToDBN(bestPInfos, cptsITI, pseudoCountSize)
+        val dbn = cptsITIToDBN(cptsITI, priorJointParams, pseudoCountSize)
 
         return DBNInfo(reasonableParents, bestPInfos, cptsITI, priorJointParams, dbn, pSetPriors, timeStep)
     }
 
     fun trialUpdate(seqTrial : SequentialTrial, trialHistory : List<SequentialTrial>, expertEv : List<DirEdge>, timeOfUpdate: TimeStamp, dbnInfo: DBNInfo) : DBNInfo{
-        var newReasonableParents = dbnInfo.reasonableParents.mapValues { (rv, rps) -> parameterUpdate(rv, rps, seqTrial, expertEv, pseudoCountSize ) }
+        var newReasonableParents = dbnInfo.reasonableParents.mapValues { (rv, rps) -> parameterUpdate(rv, rps, seqTrial, expertEv, dbnInfo.pSetPriors[rv]!!, pseudoCountSize ) }
         var lastStructUpdate = dbnInfo.lastStructUpdate
 
         if(timeOfUpdate - dbnInfo.lastStructUpdate > 50){
@@ -98,9 +100,9 @@ class BuntineUpdater(private val aliveThresh: Double, private val pseudoCountSiz
             Pair(incrementalUpdate(newVocabDT, listOf(seqTrial), newConfig), newConfig)
         }
 
-        val dbn = cptsITIToDBN(bestParents, cptsITI, pseudoCountSize)
+        val dbn = cptsITIToDBN(cptsITI, dbnInfo.priorJointParams, pseudoCountSize)
 
-        return dbnInfo.copy(reasonableParents = newReasonableParents, bestPInfos = bestParents(newReasonableParents), lastStructUpdate = lastStructUpdate, dbn = dbn)
+        return dbnInfo.copy(reasonableParents = newReasonableParents, bestPInfos = bestParents, lastStructUpdate = lastStructUpdate, dbn = dbn, cptsITI = cptsITI)
     }
 }
 
@@ -118,11 +120,13 @@ fun parameterUpdate(child : RandomVariable,
                     reasonableParents :  List<SeqPInfo>,
                     seqTrial : SequentialTrial,
                     expertEvidence : List<DirEdge>,
+                    structuralPrior: LogPrior<PSet>,
                     alphaTotal: Double) : List<SeqPInfo>{
     val newReasonableParentSets = reasonableParents.map { pInfo ->
         //Sample counts are updated incrementally here
         pInfo.addTrial(seqTrial)
 
+        /*
         val parentAssgn = seqTrial.prevState.filterKeys { it in pInfo.parentSet }
         val childVal = seqTrial.currentState[child]!!
 
@@ -134,6 +138,8 @@ fun parameterUpdate(child : RandomVariable,
 
         //Update Structural Probability
         val newLogProb = pInfo.logProbability + Math.log(countJoint + alphaJoint - 1) - Math.log(countMarginal + alphaMarginal - 1)
+        */
+        val newLogProb = structuralPrior(pInfo.parentSet) + BDsScore(pInfo.child, pInfo.parentSet, pInfo.counts, alphaTotal)
         pInfo.copy(logProbability = newLogProb)
     }
 
@@ -178,7 +184,7 @@ fun createPInfo(child : RandomVariable, pSet: PSet, trials : List<SequentialTria
 
     val score = when(violatesEvidence(child, pSet, expertEv)){
         true -> Math.log(0.0)
-        false -> logPrior(pSet) + BDeuScore(child, pSet, counts, priorParams, priorSampleSize)
+        false -> logPrior(pSet) + BDsScore(child, pSet, counts, priorSampleSize)
     }
 
     return SeqPInfo(child, pSet, score, counts, priorParams)
@@ -246,7 +252,7 @@ fun structuralUpdate(X : RandomVariable,
             }
             bestScore = maxOf(pInfo.logProbability, bestScore)
 
-            if(oldBestScore <= bestScore){
+            if(oldBestScore < bestScore){
                 aliveList = revisedAliveList(aliveThresh, aliveList, pSetInfos)
             }
         }

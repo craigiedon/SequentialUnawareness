@@ -1,11 +1,10 @@
 import org.junit.*
 
+fun <T, C> makeLeaf(examples : List<T>, config : ITIUpdateConfig<T, C>, branchLabel : RVAssignment = emptyMap(), stale : Boolean = false) : ITILeaf<T,C>{
+    return ITILeaf(branchLabel, createStats(examples, config), examples, classCounts(examples, config.exampleToClass), stale)
+}
+
 class ITITests{
-
-    fun <T, C> makeLeaf(examples : List<T>, config : ITIUpdateConfig<T, C>, branchLabel : RVAssignment = emptyMap(), stale : Boolean = false) : ITILeaf<T,C>{
-        return ITILeaf(branchLabel, createStats(examples, config), examples, classCounts(examples, config.exampleToClass), stale)
-    }
-
     @Test
     fun incUpdate_emptyTree_singleLeaf(){
         val vocab = setOf(A, B, C)

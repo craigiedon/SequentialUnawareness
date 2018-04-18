@@ -246,7 +246,7 @@ class BuntineTests{
         val expertEvidence = emptyList<DirEdge>()
         val alphaTotal = 5.0
 
-        val result = parameterUpdate(A, reasonableParents, seqTrial, expertEvidence, alphaTotal)
+        val result = parameterUpdate(A, reasonableParents, seqTrial, expertEvidence, {0.0}, alphaTotal)
         val expected = emptyList<SeqPInfo>()
         Assert.assertEquals(expected, result)
     }
@@ -267,7 +267,7 @@ class BuntineTests{
         val expertEvidence = emptyList<DirEdge>()
         val alphaTotal = 5.0
 
-        val result = parameterUpdate(A, reasonableParents, seqTrial, expertEvidence, alphaTotal)
+        val result = parameterUpdate(A, reasonableParents, seqTrial, expertEvidence, {logPrior}, alphaTotal)
         Assert.assertEquals(1, result.size)
         Assert.assertEquals(emptySet<RandomVariable>(), result[0].parentSet)
         Assert.assertEquals(mapOf(emptyMap<RandomVariable, Int>() to mutableListOf(1,2)), result[0].counts)
@@ -302,7 +302,7 @@ class BuntineTests{
         val expertEvidence = emptyList<DirEdge>()
         val alphaTotal = 5.0
 
-        val result = parameterUpdate(A, reasonableParents, seqTrial, expertEvidence, alphaTotal)
+        val result = parameterUpdate(A, reasonableParents, seqTrial, expertEvidence, {logPrior}, alphaTotal)
         Assert.assertEquals(2, result.size)
 
         Assert.assertEquals(emptySet<RandomVariable>(), result[0].parentSet)
@@ -457,7 +457,7 @@ class BuntineTests{
         val bestPInfos = mapOf(A to AParent, B to BParent)
         val logPriors : Map<RandomVariable, (PSet) -> Double> = mapOf(A to { pSet -> Math.log(1.0) }, B to { pSet -> Math.log(1.0) })
 
-        val updateConfig = ITIUpdateConfig<SequentialTrial, Int>({1}, { x, y -> true}, { x, y -> 1.0}, 1.0, setOf(A,B))
+        val updateConfig = ITIUpdateConfig<SequentialTrial, Int>({1}, { x, y -> true}, { x  -> 1.0}, 1.0, setOf(A,B))
         val cptsITI = mapOf(
             A to Pair(ITILeaf(emptyMap(), emptyMap(), emptyList<SequentialTrial>(), HashMap<Int,Int>(), false), updateConfig),
             B to Pair(ITILeaf(emptyMap(), emptyMap(), emptyList<SequentialTrial>(), HashMap<Int,Int>(), false), updateConfig)
@@ -470,4 +470,29 @@ class BuntineTests{
         Assert.assertEquals(Math.log(0.1 * 0.1 * 0.9), result.pSetPriors[C]!!(setOf(A, B)), 10E-10)
         Assert.assertEquals(7, result.reasonableParents[C]!!.size)
     }
+
+    @Test
+    fun bds_zeroCountsShouldntMakeMoreParentsLikely(){
+        val pSet1 = setOf<RandomVariable>()
+
+        val counts1 = mapOf(
+            emptyMap<RandomVariable, Int>() to mutableListOf(91, 11)
+        )
+
+        val pSet2 = setOf(B)
+
+        val counts2 = mapOf(
+            mapOf(B to 0) to mutableListOf(1, 1),
+            mapOf(B to 1) to mutableListOf(90, 10)
+        )
+
+        val pseudoCount = 20.0
+
+        val logProb1 = BDsScore(A, pSet1, counts1, pseudoCount) // + Math.log(0.1 * 0.9)
+        val logProb2 = BDsScore(A, pSet2, counts2, pseudoCount) // + Math.log(0.1 * 0.1)
+
+        val probOdds = Math.exp(logProb1 - logProb2)
+        println("Done")
+    }
+
 }

@@ -6,6 +6,7 @@ import Utils.productByDouble
 sealed class DecisionTree<T>
 data class DTLeaf<T>(val value: T) : DecisionTree<T>()
 data class DTDecision<T>(val rv: RandomVariable, val branches : List<DecisionTree<T>>) : DecisionTree<T>()
+
 typealias NaiveFactors = Map<RandomVariable, Factor>
 typealias Action = String
 typealias QTree = DecisionTree<Double>
@@ -61,17 +62,15 @@ fun convertFromITI(binaryRTree : RewardNode) : DecisionTree<Reward> =
         }
     }
 
-fun convertToCPT(rv : RandomVariable, binaryPTree: ProbNode, priorParams: Map<RVAssignment, Factor>, pseudoCountStrength: Double, assignmentSoFar: RVAssignment = emptyMap()) : DecisionTree<Factor> =
+fun convertToCPT(childRV: RandomVariable, binaryPTree: ProbNode, jointParamPrior : DecisionTree<Factor>, pseudoCountStrength: Double) : DecisionTree<Factor> =
     when(binaryPTree){
         is ITILeaf -> {
-            val matchingFactors = matchingAssignments(assignmentSoFar, priorParams)
-            // Add matching factors together using factor function used in create p info
-            val relevantPrior = add(matchingFactors)
-            val bestParams = maxPosteriorParams(rv, binaryPTree.counts, relevantPrior, pseudoCountStrength)
+            val relevantPrior = jointQuery(binaryPTree.branchLabel, jointParamPrior)
+            val bestParams = maxPosteriorParams(childRV, binaryPTree.counts, relevantPrior, pseudoCountStrength)
             DTLeaf(bestParams)
         }
         is ITIDecision -> {
-            if(rv.domainSize != 2){
+            if(binaryPTree.currentTest.first.domainSize != 2){
                 throw NotImplementedError("Can't yet handle non-binary variables")
             }
             val orderedBranches = if(binaryPTree.currentTest.second == 0){
@@ -80,7 +79,7 @@ fun convertToCPT(rv : RandomVariable, binaryPTree: ProbNode, priorParams: Map<RV
             else{
                 listOf(binaryPTree.failBranch, binaryPTree.passBranch)
             }
-            DTDecision(rv, orderedBranches.mapIndexed { i, branch -> convertToCPT(rv, branch, priorParams, pseudoCountStrength, assignmentSoFar + Pair(binaryPTree.currentTest.first, i))} )
+            DTDecision(binaryPTree.currentTest.first, orderedBranches.map{ branch -> convertToCPT(childRV, branch, jointParamPrior, pseudoCountStrength) } )
         }
     }
 
@@ -172,6 +171,7 @@ fun  regressPolicy(valTree: DecisionTree<Double>, rewardTree : DecisionTree<Doub
     return policyVals
 }
 
+/*
 fun structuredSuccessiveApproximation(rewardTree : DecisionTree<Double>, policyTree : DecisionTree<Action>, actionDBNs : Map<Action, DynamicBayesNet>) : DecisionTree<Double> {
     var valueTree = rewardTree
     do{
@@ -184,7 +184,9 @@ fun structuredSuccessiveApproximation(rewardTree : DecisionTree<Double>, policyT
     while(biggestDiff < 0.001)
     return valueTree
 }
+*/
 
+/*
 fun structuredPolicyIteration(rewardTree : DecisionTree<Double>, actionDBNs : Map<Action, DynamicBayesNet>) : DecisionTree<Action>{
     var currentPolicy : DecisionTree<Action> = DTLeaf(actionDBNs.keys.first()) // Start by deterministically doing action 0 in every state
     do{
@@ -198,6 +200,7 @@ fun structuredPolicyIteration(rewardTree : DecisionTree<Double>, actionDBNs : Ma
     } while (policyChanged)
     return currentPolicy
 }
+*/
 
 fun structuredValueIteration(rewardTree : DecisionTree<Double>, actionDBNs: Map<Action, DynamicBayesNet>) : Pair<PolicyTree, VTree>{
     var valueTree = rewardTree
@@ -209,7 +212,7 @@ fun structuredValueIteration(rewardTree : DecisionTree<Double>, actionDBNs: Map<
         val biggestDiff = foldTree(diffTree, 0.0, ::maxOf)
 
         valueTree = newValueTree
-    } while(biggestDiff < 0.001)
+    } while(biggestDiff > 0.001)
 
     val finalQTrees = actionDBNs.mapValues { regress(valueTree, rewardTree, it.value) }
     val finalPolicy = choosePolicy(finalQTrees)
@@ -239,7 +242,8 @@ fun applyExpertAdvice(rewardTree : DecisionTree<Double>, valueTree : DecisionTre
 fun choosePolicy(qTrees : Map<Action, DecisionTree<Double>>) : PolicyTree {
     val annotatedActionQs = qTrees.map {(a, qt) -> fMap(qt, {qVal -> Pair(a, qVal)})}
     val annotatedPolicy = merge(annotatedActionQs, ::maxBySecond, {a, b -> a == b})
-    return fMap(annotatedPolicy, {(action, _) -> action})
+    val unsimplifiedPolicy = fMap(annotatedPolicy, {(action, _) -> action})
+    return simplify(unsimplifiedPolicy, {a1, a2 -> a1 == a2 })
 }
 
 fun <T, S : Comparable<S>> maxBySecond(p1 : Pair<T,S>, p2 : Pair<T, S>) =
@@ -288,9 +292,15 @@ fun probability(assignment : RVAssignment, factorMap : NaiveFactors) : Double{
 fun <T> matchLeaf(dTree : DecisionTree<T>, context: RVAssignment) : DTLeaf<T> =
     when(dTree){
         is DTLeaf -> dTree
-        is DTDecision -> matchLeaf(dTree.branches[context[dTree.rv]!!], context)
+        is DTDecision -> {
+            if(dTree.rv !in context){
+                throw IllegalArgumentException("Tree trying to match against RV not present in context: ${dTree.rv}")
+            }
+            matchLeaf(dTree.branches[context[dTree.rv]!!], context)
+        }
     }
 
+/*
 fun <T> matchAllLeaves(dTree : DecisionTree<T>, partialContext : RVAssignment) : List<DTLeaf<T>> =
     when(dTree){
         is DTLeaf -> listOf(dTree)
@@ -301,6 +311,7 @@ fun <T> matchAllLeaves(dTree : DecisionTree<T>, partialContext : RVAssignment) :
             dTree.branches.flatMap { matchAllLeaves(it, partialContext) }
         }
     }
+*/
 
 fun unifStartIDTransJoint(vocab : Collection<RandomVariable>, noise : Double = 0.0) =
     vocab.associate { Pair(it, unifStartIDTransJoint(it, noise)) }

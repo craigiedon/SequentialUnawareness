@@ -73,10 +73,10 @@ fun <X> List<X>.swapped(firstIndex: Int, secondIndex: Int): List<X> {
 
 fun <T> Pair<T, T>.contains(item : T) = this.first == item || this.second == item
 
-fun List<Int>.product() = this.fold(1, { a, b -> a * b })
-fun <T> List<T>.productByDouble(converter: (T) -> Double) = this.fold(1.0, { a, b -> a * converter(b) })
+fun Collection<Int>.product() = this.fold(1, { a, b -> a * b })
+fun <T> Collection<T>.productByDouble(converter: (T) -> Double) = this.fold(1.0, { a, b -> a * converter(b) })
 
-fun <T> List<T>.productBy(converter : (T) -> Int) = this.map{converter(it)}.product()
+fun <T> Collection<T>.productBy(converter : (T) -> Int) = this.map{converter(it)}.product()
 
 fun <T, S> Pair<T,T>.map(f : (T) -> S) = Pair(f(this.first), f(this.second))
 

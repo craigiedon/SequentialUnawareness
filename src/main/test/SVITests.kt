@@ -133,13 +133,14 @@ class SVITests{
             DTDecision(Y, listOf(
                 DTDecision(X, listOf(
                     DTLeaf(0.0),
-                    DTLeaf(6.56)
+                    DTLeaf(6.561)
                 )),
                 DTLeaf(16.119)
             )),
             DTLeaf(27.1)
         ))
         val result = regress(value1Step, rewardTree, dbn)
+
         Assert.assertTrue(checkEquality(expected, result, ::doubleEquality))
     }
 

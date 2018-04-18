@@ -1,6 +1,11 @@
 import com.fasterxml.jackson.databind.JsonNode
 
-data class MDP(val vocab : Set<RandomVariable>, val rewardTree : DecisionTree<Reward>, val actions : Set<Action>, val dbns : Map<Action, DynamicBayesNet>, val discount : Double){
+data class MDP(val vocab : Set<RandomVariable>,
+               val rewardTree : DecisionTree<Reward>,
+               val actions : Set<Action>,
+               val dbns : Map<Action, DynamicBayesNet>,
+               val discount : Double,
+               val terminalDescriptions : List<RVAssignment> = emptyList()){
     val dbnStructs : Map<Action, DBNStruct> get() = dbns.mapValues { dbnStruct(it.value) }
     val rewardScope : Set<RandomVariable> get() = vocabInDT(rewardTree)
 }
@@ -45,12 +50,6 @@ fun simpleBoutillier() : MDP {
     return MDP(vocab, rewardTree, actions, dbns, 0.99)
 }
 
-/*
-fun unifStartIDTransJointDBN(vocab : Set<RandomVariable>, noise : Double = 0.0) : DynamicBayesNet{
-    return vocab.associate { rv -> Pair(rv, identityTransition(rv, noise)) }
-}
-*/
-
 fun identityTransitionDBN(vocab : Set<RandomVariable>, noise : Double = 0.0) : DynamicBayesNet {
     return vocab.associate { rv -> Pair(rv, identityTransition(rv, noise)) }
 }
@@ -79,9 +78,21 @@ fun loadMDP(jsonFilePath : String) : MDP{
 
     val rewardTree = parseRewardTree(jsonNode.get("reward"), vocab)
 
-
     val discount : Double = jsonNode.get("discount").asDouble()
-    return MDP(vocab.values.toSet(), rewardTree, actionNames, dbns, discount)
+
+    val terminalDescriptions : List<RVAssignment> = jsonNode.get("terminalDescriptions")
+        .asSequence()
+        .map{ terminalDescription ->
+            terminalDescription.fields()
+                .asSequence()
+                .associate { (rvString, nodeVal) ->
+                    val rv = vocab[rvString]!!
+                    val domVal = nodeVal.asText()
+                    Pair(rv, rv.domain.indexOf(domVal)) }
+
+        }.toList()
+
+    return MDP(vocab.values.toSet(), rewardTree, actionNames, dbns, discount, terminalDescriptions)
 }
 
 fun parseProbTree(jsonProbNode : JsonNode, rv : RandomVariable, vocab : Map<String, RandomVariable>) : DecisionTree<Factor>{
@@ -108,6 +119,19 @@ fun parseRewardTree(jsonRewardNode : JsonNode, vocab : Map<String, RandomVariabl
     val rv = vocab[varName]!!
     val branches = rv.domain.map { parseRewardTree(decisionNode.get(it), vocab) }
     return DTDecision(rv, branches)
+}
+
+fun generateInitialState(vocab : List<RandomVariable>, terminalDescriptions : List<RVAssignment>) : RVAssignment {
+    if(terminalDescriptions.any{ !vocab.containsAll(it.keys)}){
+        throw IllegalArgumentException("Terminal State Descriptions contain vocabulary not present in given vocab")
+    }
+
+    while(true){
+        val potentialSample = generateSample(vocab)
+        if(terminalDescriptions.none { td -> partialMatch(td, potentialSample) }){
+            return potentialSample
+        }
+    }
 }
 
 fun main(args : Array<String>) {

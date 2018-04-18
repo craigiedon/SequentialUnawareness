@@ -1,6 +1,4 @@
-import Utils.allEqual
-import Utils.map
-import Utils.merge
+import Utils.*
 import org.apache.commons.math3.special.Gamma
 
 data class SequentialTrial(val prevState : RVAssignment, val action : Action, val currentState : RVAssignment, val reward : Double)
@@ -8,7 +6,7 @@ data class SequentialTrial(val prevState : RVAssignment, val action : Action, va
 data class ITIUpdateConfig<in T, C>(
     val exampleToClass : (T) -> C,
     val testChecker : (RVTest, T) -> Boolean,
-    val scoreFunc : (RVAssignment, Map<C, Int>) -> Double,
+    val scoreFunc : (List<Map<C, Int>>) -> Double,
     val splitThresh : Double,
     val vocab : Set<RandomVariable>
 )
@@ -45,11 +43,11 @@ typealias ProbNode = ITINode<SequentialTrial, Int>
 typealias PLeaf = ITILeaf<SequentialTrial, Int>
 typealias PDecision = ITIDecision<SequentialTrial, Int>
 
-fun probTreeConfig(rv : RandomVariable, vocab : Set<RandomVariable>, jointParamPrior : DecisionTree<Factor>, pseudoCountSize : Double, splitThresh : Double) =
+fun probTreeConfig(rv : RandomVariable, vocab : Set<RandomVariable>, pseudoCountSize : Double, splitThresh : Double) =
     ITIUpdateConfig<SequentialTrial, Int>(
-        { example -> example.currentState[rv]!! },
-        { rvTest, example -> example.prevState[rvTest.first] == rvTest.second },
-        { branchLabel, counts -> BDeScore(rv, counts, branchLabel, jointParamPrior, pseudoCountSize)},
+        { (_, _, currentState) -> currentState[rv]!! },
+        { rvTest, (prevState) -> prevState[rvTest.first] == rvTest.second },
+        { splitCounts -> BDsScore(rv, splitCounts.map { it.toOrderedList(rv) }, pseudoCountSize)},
         splitThresh,
         vocab
     )
@@ -62,8 +60,8 @@ typealias RDecision = ITIDecision<Trial, Double>
 fun rewardTreeConfig(vocab : Set<RandomVariable>) =
     ITIUpdateConfig<Trial, Reward>(
         { it.reward },
-        { rvTest, example -> example.assignment[rvTest.first] == rvTest.second } ,
-        { _ , counts -> weightedNegativeEntropy(counts) },
+        { rvTest, (assignment) -> assignment[rvTest.first] == rvTest.second } ,
+        { splitCounts -> splitCounts.sumByDouble(::weightedNegativeEntropy) },
         0.0,
         vocab
     )
@@ -73,19 +71,19 @@ fun emptyRewardTree(vocab : Set<RandomVariable>) : RewardTree {
     return Pair(emptyNode(config), config)
 }
 
-fun emptyProbTree(rv : RandomVariable, vocab : Set<RandomVariable>, jointParamPrior : DecisionTree<Factor>, pseudoCountSize : Double, splitThresh : Double) : ProbTree {
-    val config = probTreeConfig(rv, vocab, jointParamPrior, pseudoCountSize, splitThresh)
+fun emptyProbTree(rv : RandomVariable, vocab : Set<RandomVariable>, pseudoCountSize : Double, splitThresh : Double) : ProbTree {
+    val config = probTreeConfig(rv, vocab, pseudoCountSize, splitThresh)
     return Pair(emptyNode(config), config)
 }
 
 fun <T, C> emptyNode(itiUpdateConfig: ITIUpdateConfig<T, C>) : ITINode<T, C>{
     val emptyLeaf = ITILeaf<T, C>(emptyMap(), createStats(itiUpdateConfig.vocab, emptyList(), itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass), emptyList(), HashMap<C, Int>(), true)
-    return ensureBestTest(emptyLeaf, itiUpdateConfig.vocab, itiUpdateConfig.scoreFunc, itiUpdateConfig.splitThresh, itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass)
+    return ensureBestTest(emptyLeaf, itiUpdateConfig.vocab, itiUpdateConfig)
 }
 
 fun <T, C> incrementalUpdate(dt : ITINode<T, C>, examples : List<T>, itiUpdateConfig: ITIUpdateConfig<T, C>): ITINode<T, C> {
     val exampleAddedTree = addExamples(dt, examples, itiUpdateConfig.exampleToClass, itiUpdateConfig.testChecker)
-    val testUpdatedNode = ensureBestTest(exampleAddedTree, itiUpdateConfig.vocab, itiUpdateConfig.scoreFunc, itiUpdateConfig.splitThresh, itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass)
+    val testUpdatedNode = ensureBestTest(exampleAddedTree, itiUpdateConfig.vocab, itiUpdateConfig)
     return testUpdatedNode
 }
 
@@ -100,7 +98,7 @@ fun <T, C> changeAllowedVocab(itiTree : ITITree<T, C>, allowedVocab: Set<RandomV
             is ITILeaf -> {
                 val additionalTests = createStats(additionalVars, node.examples, itiTree.second.testChecker, itiTree.second.exampleToClass)
                 val updatedTests = filteredTests + additionalTests
-                return node.copy(testCandidates = updatedTests)
+                return node.copy(testCandidates = updatedTests, stale = true)
             }
             is ITIDecision -> {
                 val newPassBranch = changeAllowedVocabRec(node.passBranch, allowedVocab)
@@ -149,38 +147,36 @@ fun <T, C> addExamples(itiNode: ITINode<T,C>, examples: List<T>, classExtractor 
     }
 }
 
-fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, scoreFunc: (RVAssignment, Map<C, Int>) -> Double, scoreThresh : Double, testChecker : (RVTest, T) -> Boolean, classExtractor: (T) -> C) : ITINode<T,C>{
+fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config: ITIUpdateConfig<T, C>) : ITINode<T,C>{
     if(dt.stale && dt.testCandidates.isNotEmpty()){
-        val testScores = dt.testCandidates.mapValues{ (_, testStat) ->
-            scoreFunc(dt.branchLabel + Pair(testStat.rv, testStat.testVal), testStat.passTrialCounts) +
-            scoreFunc(dt.branchLabel + Pair(testStat.rv, 1 - testStat.testVal), testStat.failTrialCounts)
-        }
+        val testScores = dt.testCandidates
+            .mapValues{ (_, testStat) -> config.scoreFunc(listOf(testStat.passTrialCounts, testStat.failTrialCounts)) }
 
         val (bestTest, bestScore) = testScores.entries.maxBy { it.value }!!
 
         when(dt){
             is ITIDecision -> {
 
-                val revisedNode = if(bestTest != dt.currentTest && bestScore - testScores[dt.currentTest]!! > scoreThresh)
-                    transposeTree(dt, bestTest, vocab, testChecker, classExtractor)
+                val revisedNode = if(dt.currentTest !in testScores || (bestTest != dt.currentTest && bestScore - testScores[dt.currentTest]!! > config.splitThresh))
+                    transposeTree(dt, bestTest, vocab, config.testChecker, config.exampleToClass)
                 else dt
 
                 return revisedNode.copy(stale = false,
-                    passBranch = ensureBestTest(revisedNode.passBranch, vocab, scoreFunc, scoreThresh, testChecker, classExtractor),
-                    failBranch = ensureBestTest(revisedNode.failBranch, vocab, scoreFunc, scoreThresh, testChecker, classExtractor))
+                    passBranch = ensureBestTest(revisedNode.passBranch, vocab, config),
+                    failBranch = ensureBestTest(revisedNode.failBranch, vocab, config))
             }
             is ITILeaf -> {
-                val currentScore = scoreFunc(dt.branchLabel, dt.counts)
-                if(bestScore - currentScore > scoreThresh) {
-                    val (passTrials, failTrials) = dt.examples.partition { testChecker(bestTest, it) }
-                    val passLeaf = ITILeaf(dt.branchLabel + bestTest, createStats(vocab, passTrials, testChecker, classExtractor), passTrials, dt.testCandidates[bestTest]!!.passTrialCounts, true)
-                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest.first, 1 - bestTest.second), createStats(vocab, failTrials, testChecker, classExtractor), failTrials, dt.testCandidates[bestTest]!!.failTrialCounts, true)
+                val currentScore = config.scoreFunc(listOf(dt.counts))
+                if(bestScore - currentScore > config.splitThresh) {
+                    val (passTrials, failTrials) = dt.examples.partition { config.testChecker(bestTest, it) }
+                    val passLeaf = ITILeaf(dt.branchLabel + bestTest, createStats(vocab, passTrials, config.testChecker, config.exampleToClass), passTrials, dt.testCandidates[bestTest]!!.passTrialCounts, true)
+                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest.first, 1 - bestTest.second), createStats(vocab, failTrials, config.testChecker, config.exampleToClass), failTrials, dt.testCandidates[bestTest]!!.failTrialCounts, true)
                     return ITIDecision(
                         dt.branchLabel,
                         dt.testCandidates,
                         bestTest,
-                        ensureBestTest(passLeaf, vocab, scoreFunc, scoreThresh, testChecker, classExtractor),
-                        ensureBestTest(failLeaf, vocab, scoreFunc, scoreThresh, testChecker, classExtractor),
+                        ensureBestTest(passLeaf, vocab, config),
+                        ensureBestTest(failLeaf, vocab, config),
                         false
                     )
                 }
@@ -304,21 +300,92 @@ fun <T, C> addTrials(stat : TestStats<C>, examples: List<T>, testChecker: (RVTes
 }
 
 
+/*
 fun BDeScore(rv : RandomVariable, counts : Map<Int, Int>, partialAssignment : RVAssignment, jointParamPrior: DecisionTree<Factor>, pseudoSampleSize: Double) : Double {
     val priorFactor = jointQuery(partialAssignment, jointParamPrior)
-    return BDeScore(counts.toOrderedList(rv), priorFactor, pseudoSampleSize)
+    return BDePAssgn(counts.toOrderedList(rv), priorFactor, pseudoSampleSize)
 }
 
-fun BDeScore(rv : RandomVariable, counts : Map<Int, Int>, pseudoSampleSize: Double) =
-    BDeScore(counts.toOrderedList(rv), pseudoSampleSize = pseudoSampleSize)
+// Not used with prob trees : Used for parent set calculations
+fun BDeScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, paramPrior : Map<RVAssignment, Factor>, pseudoSampleSize: Double) : Double {
+    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
+        BDePAssgn(counts[pAssgn]!!, paramPrior[pAssgn]!!, pseudoSampleSize)
+    }
+    return pAssignScores.sumByDouble { it }
+}
 
-fun BDeScore(counts: List<Int>, paramPrior: Factor? = null, pseudoSampleSize: Double = 1.0) : Double{
+fun BDeuScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, pseudoSampleSize: Double) : Double {
+    val jointCardinality = rv.domainSize.toDouble() * pSet.productBy { it.domainSize }
+    val priorFactor = Factor(listOf(rv), repeatNum(1.0 / jointCardinality, rv.domainSize))
+
+    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
+        BDePAssgn(counts[pAssgn]!!, priorFactor, pseudoSampleSize)
+    }
+    return pAssignScores.sumByDouble { it }
+}
+
+fun BDScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, alphaTerm : Double) : Double {
+    val priorFactor = Factor(listOf(rv), repeatNum(1.0, rv.domainSize))
+
+    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
+        BDePAssgn(counts[pAssgn]!!, priorFactor, alphaTerm)
+    }
+    return pAssignScores.sumByDouble { it }
+}
+
+
+
+fun AvgESSBDeu(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, essPowersRange : Int) : Double{
+    val jointCardinality = rv.domainSize.toDouble() * pSet.productBy { it.domainSize }
+    val priorFactor = Factor(listOf(rv), repeatNum(1.0 / jointCardinality, rv.domainSize))
+    val sampleSizes = ((-essPowersRange / 2) .. (essPowersRange / 2)).map { Math.pow(2.0, it.toDouble()) }
+
+    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
+        val sizeScores = sampleSizes.map{ pseudoSampleSize ->
+            BDePAssgn(counts[pAssgn]!!, priorFactor, pseudoSampleSize)
+        }
+        val totalScore = sumInnerLnProbs(sizeScores)
+        val averageScore = totalScore - Math.log(essPowersRange.toDouble())
+        averageScore
+    }
+    return pAssignScores.sumByDouble { it }
+}
+*/
+
+fun BDsScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, pseudoSampleSize: Double) : Double {
+    val nonZeroParentAssignments = counts.values.count{ margCounts -> margCounts.any { it > 0 } }
+    if(nonZeroParentAssignments == 0) return Math.log(0.0)
+    val priorFactor = Factor(listOf(rv), repeatNum(1.0 / (nonZeroParentAssignments * rv.domainSize), rv.domainSize))
+
+
+    val pAssignScores = allAssignments(pSet.toList())
+        .filter { pAssgn -> counts[pAssgn]!!.any { it > 0 } }
+        .map{ pAssgn ->
+            BDePAssgn(counts[pAssgn]!!, priorFactor, pseudoSampleSize)
+        }
+    return pAssignScores.sumByDouble { it }
+}
+
+fun BDsScore(rv : RandomVariable, splitCounts : List<List<Int>>, pseudoSampleSize: Double) : Double{
+    val nonZeroSplits = splitCounts.count{ counts -> counts.any{it > 0 } }
+    if(nonZeroSplits == 0) return Math.log(0.0)
+
+    val priorFactor = Factor(listOf(rv), repeatNum(1.0 / nonZeroSplits * rv.domainSize, rv.domainSize))
+
+    return splitCounts
+        .filter { counts -> counts.any { it > 0 } }
+        .sumByDouble {  counts -> BDePAssgn(counts, priorFactor, pseudoSampleSize)
+    }
+}
+
+fun BDePAssgn(counts: List<Int>, paramPrior: Factor, pseudoSampleSize: Double = 1.0) : Double{
 
     val betaNumeratorArgs = ArrayList<Double>()
     val betaDenominatorArgs = ArrayList<Double>()
 
     for((childVal, count) in counts.withIndex()){
-        val pseudoCount = (if(paramPrior != null) paramPrior.values[childVal] else (1.0 / counts.size)) * pseudoSampleSize
+        val pseudoCount = paramPrior.values[childVal] * pseudoSampleSize
+
         betaNumeratorArgs.add(count + pseudoCount)
         betaDenominatorArgs.add(pseudoCount)
     }
@@ -329,25 +396,7 @@ fun BDeScore(counts: List<Int>, paramPrior: Factor? = null, pseudoSampleSize: Do
     return logBetaNumerator - logBetaDenominator
 }
 
-// Not used with prob trees : Used for parent set calculations
-fun BDeuScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, paramPrior : Map<RVAssignment, Factor>, pseudoSampleSize: Double) : Double =
-    allAssignments(pSet.toList()).sumByDouble{ pAssgn ->
-        BDeScore(counts[pAssgn]!!, paramPrior[pAssgn]!!, pseudoSampleSize)
-    }
 
-fun distributeAcrossFactors(factors : List<Factor>) : Factor{
-    if(!allEqual(factors.map { it.scope })){
-        throw IllegalArgumentException("Scope must match exactly")
-    }
-
-    val newValues = factors
-        .map { f -> f.values.map { it / factors.size } }
-        .reduce { accProbs, currentProbs ->
-            accProbs.zip(currentProbs).map { (acc, current) -> acc + current }
-        }
-
-    return Factor(factors[0].scope, newValues)
-}
 
 fun add(factors : List<Factor>) : Factor{
     if(!allEqual(factors.map { it.scope })){
