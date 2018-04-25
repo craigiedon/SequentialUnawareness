@@ -1,15 +1,72 @@
 import Utils.project
 import Utils.random
+import java.io.FileWriter
+import java.io.PrintWriter
 
 fun main(args : Array<String>){
     val mdp = loadMDP("mdps/coffee.json")
-    runLearning(mdp)
+
+    /*
+    val configs = listOf(
+        ExperimentConfig("RandomPolicy", 1.0, false, 10, 0.01),
+        ExperimentConfig("NoExpert", 0.1, false, 10000000, 0.01),
+        ExperimentConfig("TruePolicy", 0.1, true, 10, 0.01),
+        ExperimentConfig("NoPruning", 0.1, false, 10, 0.00),
+        ExperimentConfig("Default", 0.1, false, 10, 0.01)
+    )
+
+    for(config in configs){
+        for(i in 0..30){
+            ResultsLogger.filePath = "logs/coffeeTest${config.experimentName}-$i"
+            runLearning(mdp, config)
+        }
+    }
+    */
+
+    val config = ExperimentConfig("Default", 0.1, false, 10, 0.01)
+    ResultsLogger.filePath = "logs/coffeeTest${config.experimentName}-1"
+    runLearning(mdp, config)
 }
 
-fun runLearning(trueMDP: MDP){
+data class ExperimentConfig(
+    val experimentName : String,
+    val exploreAmount: Double,
+    val useTrue : Boolean,
+    val expertAdviceInterval : Int,
+    val pruneThreshold : Double
+)
+
+
+object ResultsLogger{
+    val printToConsole = true
+    var filePath: String = "empty"
+    fun logTimeStampedResult(timeStamp: TimeStamp, result : Double, metric : String){
+        if(printToConsole){
+            println("$metric - ts: $timeStamp, val: $result")
+        }
+        val writer = PrintWriter(FileWriter("$filePath-$metric.txt", true))
+        writer.println("$timeStamp, $result")
+        writer.close()
+    }
+
+    fun logBetterActionAdvice(timeStamp: TimeStamp, agentAction : Action, betterAction: Action, state: RVAssignment){
+        if(printToConsole){
+            println("Expert Advised $betterAction over agent action $agentAction at time $timeStamp in state $state")
+        }
+        val writer = PrintWriter(FileWriter("$filePath-expertBetterAction.txt", true))
+        writer.println("$timeStamp, $agentAction, $betterAction")
+        writer.close()
+    }
+
+    fun logJSONStructure(obj : Any, objectName : String){
+        saveToJson(obj, "$filePath-$objectName")
+    }
+}
+
+fun runLearning(trueMDP: MDP, experimentConfig: ExperimentConfig){
     val (truePolicy, trueValues) = structuredValueIteration(trueMDP.rewardTree, trueMDP.dbns)
     val trueQs = trueMDP.dbns.mapValues { (_, dbn) -> regress(trueValues, trueMDP.rewardTree, dbn)}
-    val expert = Expert(10, 0.25, 10, HashSet(), trueMDP, trueQs)
+    val expert = Expert(experimentConfig.expertAdviceInterval, 0.25, experimentConfig.expertAdviceInterval, HashSet(), trueMDP, trueQs)
 
     val aliveThresh = 0.01
     val singleParentProb = 0.1
@@ -37,9 +94,15 @@ fun runLearning(trueMDP: MDP){
     var tStep = 0
     while(tStep < 4000){
         println(tStep)
-        // e greedy choice strategy at the moment
         val projectedPrevState = project(previousState, agentVocab)
-        val chosenAction = eGreedy(agentActions, agentPolicy, previousState, 1.0)
+
+        val chosenAction = if(experimentConfig.useTrue){
+            eGreedy(agentActions, truePolicy, previousState, experimentConfig.exploreAmount)
+        }
+        else{
+            eGreedy(agentActions, agentPolicy, previousState, experimentConfig.exploreAmount)
+        }
+
         println("Previous State: $previousState")
         println("Chosen Action: $chosenAction")
 
@@ -49,6 +112,7 @@ fun runLearning(trueMDP: MDP){
         val reward = matchLeaf(trueMDP.rewardTree, newTrueState).value
 
         println("New State : $newTrueState, Reward : $reward")
+        ResultsLogger.logTimeStampedResult(tStep, reward, "reward")
 
         val agentSeqTrial = Pair(tStep, SequentialTrial(projectedPrevState, chosenAction, projectedNewState, reward))
         agentTrialHist[chosenAction]!!.add(agentSeqTrial)
@@ -93,10 +157,13 @@ fun runLearning(trueMDP: MDP){
 
         // Better Action Advice
         expert.agentOptimalActionHistory.add(wasActionOptimal(previousState, chosenAction, trueQs))
-        if(tStep - expert.lastAdvice < expert.adviceInterval && !expert.agentOptimalActionHistory.last() && poorRecentPerformance(expert.agentOptimalActionHistory, expert.historyWindow, expert.mistakeProportion)){
+        if(tStep - expert.lastAdvice > expert.adviceInterval && !expert.agentOptimalActionHistory.last() && poorRecentPerformance(expert.agentOptimalActionHistory, expert.historyWindow, expert.mistakeProportion)){
             // Then tell the agent about the better action
-            val betterAction = betterActionAdvice(previousState, expert)
             tStep += 1
+            expert.lastAdvice = tStep
+            val betterAction = betterActionAdvice(previousState, expert)
+
+            ResultsLogger.logBetterActionAdvice(tStep, chosenAction, betterAction, previousState)
 
             if(betterAction !in agentActions){
                 agentActions.add(betterAction)
@@ -116,7 +183,6 @@ fun runLearning(trueMDP: MDP){
                 val earlierAdvice = actionAdvice[projectedPrevState]!!
                 val latestAdvice = Pair(agentSeqTrial.first, betterAction)
                 val resolution = resolveMisunderstanding(earlierAdvice.first, latestAdvice.first, expert)
-
                 tStep += 1
 
                 val resolutionVar = resolution.firstAssignment.first
@@ -134,17 +200,9 @@ fun runLearning(trueMDP: MDP){
         }
 
         // Policy Updates
-        /*
-        val (newPolicy, newValueTree) = structuredValueIteration(agentRewardDT, agentDBNInfos.mapValues { it.value.dbn })
-        agentValueTree = newValueTree
-        agentPolicy = newPolicy
-        */
-
-        /*
-        val (newValue, newQTrees) = incrementalSVI(agentRewardDT, agentValueTree, agentDBNInfos.mapValues {it.value.dbn} )
+        val (newValue, newQTrees) = incrementalSVI(agentRewardDT, agentValueTree, agentDBNInfos.mapValues {it.value.dbn}, experimentConfig.pruneThreshold)
         agentValueTree = newValue
         agentPolicy = choosePolicy(newQTrees)
-        */
 
         if(trueMDP.terminalDescriptions.any{ partialMatch(it, newTrueState) }){
             println("Terminal State Hit! Resetting...")
@@ -156,6 +214,15 @@ fun runLearning(trueMDP: MDP){
 
         tStep += 1
         println()
+    }
+
+    ResultsLogger.logJSONStructure(agentPolicy, "finalPolicy")
+
+    for((action, dbnInfo) in agentDBNInfos){
+        val rawStruct = dbnInfo.bestPInfos
+            .mapKeys { it.key.name }
+            .mapValues { it.value.parentSet.map { it.name } }
+        ResultsLogger.logJSONStructure(rawStruct, "transition-$action")
     }
 
     println("Done")

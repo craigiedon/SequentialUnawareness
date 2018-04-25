@@ -187,6 +187,10 @@ fun createPInfo(child : RandomVariable, pSet: PSet, trials : List<SequentialTria
         false -> logPrior(pSet) + BDsScore(child, pSet, counts, priorSampleSize)
     }
 
+    if(score.isNaN() || score.isInfinite()){
+        throw IllegalStateException("Score is not a number!")
+    }
+
     return SeqPInfo(child, pSet, score, counts, priorParams)
 }
 

@@ -228,7 +228,7 @@ class BuntineTests{
             mapOf(B to 1) to mutableListOf(0,0)
         )
 
-        val expectedLogProbability = -3.27451880847768744
+        val expectedLogProbability = logPrior(pSet) + -2.26176309847379055446
 
         val result = createPInfo(child, pSet, trials, logPrior, priorJointParams, priorSampleSize, expertEv)
 
@@ -354,7 +354,7 @@ class BuntineTests{
         val reasonableParents = mapOf(A to listOf(reasonableParent1, reasonableParent2))
         val bestPInfos = mapOf(A to reasonableParents[A]!![0])
 
-        val dbnInfo = DBNInfo(reasonableParents, bestPInfos, emptyMap(), emptyMap(), emptyMap(), emptyMap(), 0)
+        val dbnInfo = DBNInfo(reasonableParents, bestPInfos, emptyMap(), emptyMap(), emptyMap(), mapOf(A to { pSet -> 1.0 }), 0)
         val result = bUpd.trialUpdate(seqTrial, trialHistory, emptyList(), 1, dbnInfo)
         Assert.assertEquals(2, result.reasonableParents[A]!!.size)
     }

@@ -82,10 +82,28 @@ fun <T, C> emptyNode(itiUpdateConfig: ITIUpdateConfig<T, C>) : ITINode<T, C>{
 }
 
 fun <T, C> incrementalUpdate(dt : ITINode<T, C>, examples : List<T>, itiUpdateConfig: ITIUpdateConfig<T, C>): ITINode<T, C> {
+    if(!countsInSync(dt)){
+        throw IllegalStateException("Counts and examples out of sync")
+    }
     val exampleAddedTree = addExamples(dt, examples, itiUpdateConfig.exampleToClass, itiUpdateConfig.testChecker)
+    if(!countsInSync(exampleAddedTree)){
+        throw IllegalStateException("Counts and examples out of sync")
+    }
     val testUpdatedNode = ensureBestTest(exampleAddedTree, itiUpdateConfig.vocab, itiUpdateConfig)
+    if(!countsInSync(testUpdatedNode)){
+        throw IllegalStateException("Counts and examples out of sync")
+    }
+    if(testUpdatedNode is ITILeaf && testUpdatedNode.counts.values.sum() != testUpdatedNode.examples.size){
+    }
     return testUpdatedNode
 }
+
+fun <T, C> countsInSync(dt : ITINode<T,C>) : Boolean =
+    when (dt){
+        is ITILeaf -> dt.counts.values.sum() == dt.examples.size
+        is ITIDecision -> countsInSync(dt.passBranch) && countsInSync(dt.failBranch)
+    }
+
 
 fun <T, C> changeAllowedVocab(itiTree : ITITree<T, C>, allowedVocab: Set<RandomVariable>) : ITITree<T, C> {
     fun changeAllowedVocabRec(node : ITINode<T,C>, allowedVocab: Set<RandomVariable>) : ITINode<T,C>{
@@ -101,11 +119,25 @@ fun <T, C> changeAllowedVocab(itiTree : ITITree<T, C>, allowedVocab: Set<RandomV
                 return node.copy(testCandidates = updatedTests, stale = true)
             }
             is ITIDecision -> {
+                if(node.currentTest.first !in allowedVocab){
+                    val oldPassStats = node.testCandidates[node.currentTest]!!.passTrialCounts
+                    val oldFailStats = node.testCandidates[node.currentTest]!!.failTrialCounts
+                    val leafCounts = Utils.merge(oldPassStats, oldFailStats, Int::plus)
+                    val leafExamples = allExamples(node)
+                    val additionalTests = createStats(additionalVars, leafExamples, itiTree.second.testChecker, itiTree.second.exampleToClass)
+                    val updatedTests = filteredTests + additionalTests
+
+                    val newLeaf = ITILeaf(node.branchLabel.toMap(), updatedTests, leafExamples, leafCounts, true)
+                    return newLeaf
+                }
+
                 val newPassBranch = changeAllowedVocabRec(node.passBranch, allowedVocab)
                 val newFailBranch = changeAllowedVocabRec(node.failBranch, allowedVocab)
-                if(additionalVars.isEmpty() && node.currentTest.first in allowedVocab){
+
+                if(additionalVars.isEmpty()){
                     return node.copy(testCandidates = filteredTests,  passBranch = newPassBranch, failBranch = newFailBranch)
                 }
+
                 val extraPassTests = newPassBranch.testCandidates.filterKeys { it.first in additionalVars }
                 val extraFailTests = newFailBranch.testCandidates.filterKeys { it.first in additionalVars }
                 val additionalTests = mergeTests(extraPassTests, extraFailTests)
@@ -115,6 +147,12 @@ fun <T, C> changeAllowedVocab(itiTree : ITITree<T, C>, allowedVocab: Set<RandomV
     }
     return Pair(changeAllowedVocabRec(itiTree.first, allowedVocab), itiTree.second.copy(vocab = allowedVocab))
 }
+
+fun <T, C> allExamples(dt : ITINode<T,C>) : List<T> =
+    when(dt){
+        is ITILeaf -> dt.examples
+        is ITIDecision -> allExamples(dt.passBranch) + allExamples(dt.failBranch)
+    }
 
 fun <T, C> addExamples(dt : ITINode<T,C>, examples : List<T>, config: ITIUpdateConfig<T,C>) =
     addExamples(dt, examples, config.exampleToClass, config.testChecker)
@@ -127,21 +165,40 @@ fun <T, C> addExamples(itiNode: ITINode<T,C>, examples: List<T>, classExtractor 
     when(itiNode){
         is ITILeaf -> {
             // Update Counts
+            if(itiNode.counts.values.sum() != itiNode.examples.size){
+                throw IllegalStateException("Number of examples are out of sync with counts")
+            }
             for (example in examples) {
                 val classLabel = classExtractor(example)
                 val oldVal : Int = itiNode.counts.getOrDefault(classLabel, 0)
                 itiNode.counts[classLabel] = oldVal + 1
             }
             itiNode.testCandidates.forEach { _, testStat -> addTrials(testStat, examples, testChecker, classExtractor) }
+
+            if(itiNode.counts.values.sum() != itiNode.examples.size + examples.size){
+                throw IllegalStateException("Number of examples are out of sync with counts")
+            }
             return itiNode.copy(examples = itiNode.examples + examples, stale = true)
         }
         is ITIDecision -> {
             val (passTrials, failTrials) = examples.partition { testChecker(itiNode.currentTest, it) }
             val newPass = addExamples(itiNode.passBranch, passTrials, classExtractor, testChecker)
+            if(!countsInSync(newPass)){
+                throw IllegalStateException()
+            }
             val newFail = addExamples(itiNode.failBranch, failTrials, classExtractor, testChecker)
+            if(!countsInSync(newFail)){
+                throw IllegalStateException()
+            }
 
             val updatedDT = itiNode.copy(passBranch = newPass, failBranch = newFail, stale = true)
+            if(!countsInSync(updatedDT)){
+                throw IllegalStateException()
+            }
             updatedDT.testCandidates.forEach { (_, stat) -> addTrials(stat, examples, testChecker, classExtractor) }
+            if(!countsInSync(updatedDT)){
+                throw IllegalStateException()
+            }
             return  updatedDT
         }
     }
@@ -156,10 +213,17 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
 
         when(dt){
             is ITIDecision -> {
+                val shouldRevise = bestTest != dt.currentTest &&
+                    bestScore - testScores[dt.currentTest]!! > config.splitThresh &&
+                    !dt.branchLabel.containsKey(bestTest.first)
 
-                val revisedNode = if(dt.currentTest !in testScores || (bestTest != dt.currentTest && bestScore - testScores[dt.currentTest]!! > config.splitThresh))
+                val revisedNode = if(shouldRevise)
                     transposeTree(dt, bestTest, vocab, config.testChecker, config.exampleToClass)
                 else dt
+
+                if(!countsInSync(revisedNode)){
+                    throw IllegalStateException()
+                }
 
                 return revisedNode.copy(stale = false,
                     passBranch = ensureBestTest(revisedNode.passBranch, vocab, config),
@@ -168,10 +232,24 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
             is ITILeaf -> {
                 val currentScore = config.scoreFunc(listOf(dt.counts))
                 if(bestScore - currentScore > config.splitThresh) {
+                    if(dt.branchLabel.containsKey(bestTest.first)){
+                        println("Why are we putting this test in again?")
+                    }
                     val (passTrials, failTrials) = dt.examples.partition { config.testChecker(bestTest, it) }
-                    val passLeaf = ITILeaf(dt.branchLabel + bestTest, createStats(vocab, passTrials, config.testChecker, config.exampleToClass), passTrials, dt.testCandidates[bestTest]!!.passTrialCounts, true)
-                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest.first, 1 - bestTest.second), createStats(vocab, failTrials, config.testChecker, config.exampleToClass), failTrials, dt.testCandidates[bestTest]!!.failTrialCounts, true)
-                    return ITIDecision(
+                    val passLeaf = ITILeaf(dt.branchLabel + bestTest,
+                        createStats(vocab, passTrials, config.testChecker, config.exampleToClass),
+                        passTrials,
+                        dt.testCandidates[bestTest]!!.passTrialCounts.toMutableMap(),
+                        true
+                    )
+                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest.first, 1 - bestTest.second),
+                        createStats(vocab, failTrials, config.testChecker, config.exampleToClass),
+                        failTrials,
+                        dt.testCandidates[bestTest]!!.failTrialCounts.toMutableMap(),
+                        true
+                    )
+
+                    val revisedNode = ITIDecision(
                         dt.branchLabel,
                         dt.testCandidates,
                         bestTest,
@@ -179,6 +257,12 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
                         ensureBestTest(failLeaf, vocab, config),
                         false
                     )
+
+                    if(!countsInSync(revisedNode)){
+                        throw IllegalStateException()
+                    }
+
+                    return revisedNode
                 }
                 else{
                     return dt.copy(stale = false)
@@ -354,7 +438,7 @@ fun AvgESSBDeu(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List
 
 fun BDsScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, pseudoSampleSize: Double) : Double {
     val nonZeroParentAssignments = counts.values.count{ margCounts -> margCounts.any { it > 0 } }
-    if(nonZeroParentAssignments == 0) return Math.log(0.0)
+    if(nonZeroParentAssignments == 0) return Math.log(1.0)
     val priorFactor = Factor(listOf(rv), repeatNum(1.0 / (nonZeroParentAssignments * rv.domainSize), rv.domainSize))
 
 
@@ -368,7 +452,7 @@ fun BDsScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<I
 
 fun BDsScore(rv : RandomVariable, splitCounts : List<List<Int>>, pseudoSampleSize: Double) : Double{
     val nonZeroSplits = splitCounts.count{ counts -> counts.any{it > 0 } }
-    if(nonZeroSplits == 0) return Math.log(0.0)
+    if(nonZeroSplits == 0) return Math.log(1.0)
 
     val priorFactor = Factor(listOf(rv), repeatNum(1.0 / nonZeroSplits * rv.domainSize, rv.domainSize))
 

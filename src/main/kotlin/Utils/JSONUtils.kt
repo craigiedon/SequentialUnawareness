@@ -7,10 +7,14 @@ import java.io.File
 import java.io.FileWriter
 
 fun saveToJson(logData : Any, outputFolder : String, fileName: String) {
+    saveToJson(logData, "$outputFolder/$fileName")
+}
+
+fun saveToJson(logData : Any, filePath : String) {
     val mapper = jacksonObjectMapper().registerKotlinModule()
     val jsonString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(logData)
 
-    val bufWriter = BufferedWriter(FileWriter("$outputFolder/$fileName.json"))
+    val bufWriter = BufferedWriter(FileWriter("$filePath.json"))
     bufWriter.write(jsonString)
     bufWriter.close()
 }
