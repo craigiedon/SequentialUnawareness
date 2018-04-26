@@ -93,8 +93,7 @@ fun <T, C> incrementalUpdate(dt : ITINode<T, C>, examples : List<T>, itiUpdateCo
     if(!countsInSync(testUpdatedNode)){
         throw IllegalStateException("Counts and examples out of sync")
     }
-    if(testUpdatedNode is ITILeaf && testUpdatedNode.counts.values.sum() != testUpdatedNode.examples.size){
-    }
+
     return testUpdatedNode
 }
 
@@ -215,7 +214,7 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
             is ITIDecision -> {
                 val shouldRevise = bestTest != dt.currentTest &&
                     bestScore - testScores[dt.currentTest]!! > config.splitThresh &&
-                    !dt.branchLabel.containsKey(bestTest.first)
+                    dt.branchLabel[bestTest.first] != bestTest.second
 
                 val revisedNode = if(shouldRevise)
                     transposeTree(dt, bestTest, vocab, config.testChecker, config.exampleToClass)
@@ -232,7 +231,7 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
             is ITILeaf -> {
                 val currentScore = config.scoreFunc(listOf(dt.counts))
                 if(bestScore - currentScore > config.splitThresh) {
-                    if(dt.branchLabel.containsKey(bestTest.first)){
+                    if(dt.branchLabel[bestTest.first] == bestTest.second){
                         println("Why are we putting this test in again?")
                     }
                     val (passTrials, failTrials) = dt.examples.partition { config.testChecker(bestTest, it) }
@@ -382,59 +381,6 @@ fun <T, C> addTrials(stat : TestStats<C>, examples: List<T>, testChecker: (RVTes
         }
     }
 }
-
-
-/*
-fun BDeScore(rv : RandomVariable, counts : Map<Int, Int>, partialAssignment : RVAssignment, jointParamPrior: DecisionTree<Factor>, pseudoSampleSize: Double) : Double {
-    val priorFactor = jointQuery(partialAssignment, jointParamPrior)
-    return BDePAssgn(counts.toOrderedList(rv), priorFactor, pseudoSampleSize)
-}
-
-// Not used with prob trees : Used for parent set calculations
-fun BDeScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, paramPrior : Map<RVAssignment, Factor>, pseudoSampleSize: Double) : Double {
-    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
-        BDePAssgn(counts[pAssgn]!!, paramPrior[pAssgn]!!, pseudoSampleSize)
-    }
-    return pAssignScores.sumByDouble { it }
-}
-
-fun BDeuScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, pseudoSampleSize: Double) : Double {
-    val jointCardinality = rv.domainSize.toDouble() * pSet.productBy { it.domainSize }
-    val priorFactor = Factor(listOf(rv), repeatNum(1.0 / jointCardinality, rv.domainSize))
-
-    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
-        BDePAssgn(counts[pAssgn]!!, priorFactor, pseudoSampleSize)
-    }
-    return pAssignScores.sumByDouble { it }
-}
-
-fun BDScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, alphaTerm : Double) : Double {
-    val priorFactor = Factor(listOf(rv), repeatNum(1.0, rv.domainSize))
-
-    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
-        BDePAssgn(counts[pAssgn]!!, priorFactor, alphaTerm)
-    }
-    return pAssignScores.sumByDouble { it }
-}
-
-
-
-fun AvgESSBDeu(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, essPowersRange : Int) : Double{
-    val jointCardinality = rv.domainSize.toDouble() * pSet.productBy { it.domainSize }
-    val priorFactor = Factor(listOf(rv), repeatNum(1.0 / jointCardinality, rv.domainSize))
-    val sampleSizes = ((-essPowersRange / 2) .. (essPowersRange / 2)).map { Math.pow(2.0, it.toDouble()) }
-
-    val pAssignScores = allAssignments(pSet.toList()).map{ pAssgn ->
-        val sizeScores = sampleSizes.map{ pseudoSampleSize ->
-            BDePAssgn(counts[pAssgn]!!, priorFactor, pseudoSampleSize)
-        }
-        val totalScore = sumInnerLnProbs(sizeScores)
-        val averageScore = totalScore - Math.log(essPowersRange.toDouble())
-        averageScore
-    }
-    return pAssignScores.sumByDouble { it }
-}
-*/
 
 fun BDsScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, pseudoSampleSize: Double) : Double {
     val nonZeroParentAssignments = counts.values.count{ margCounts -> margCounts.any { it > 0 } }

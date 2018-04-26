@@ -6,13 +6,8 @@ import java.io.PrintWriter
 fun main(args : Array<String>){
     val mdp = loadMDP("mdps/coffee.json")
 
-    /*
     val configs = listOf(
-        ExperimentConfig("RandomPolicy", 1.0, false, 10, 0.01),
-        ExperimentConfig("NoExpert", 0.1, false, 10000000, 0.01),
-        ExperimentConfig("TruePolicy", 0.1, true, 10, 0.01),
-        ExperimentConfig("NoPruning", 0.1, false, 10, 0.00),
-        ExperimentConfig("Default", 0.1, false, 10, 0.01)
+        ExperimentConfig("BetterExpert", 0.1, false, 10, 0.01)
     )
 
     for(config in configs){
@@ -21,11 +16,7 @@ fun main(args : Array<String>){
             runLearning(mdp, config)
         }
     }
-    */
 
-    val config = ExperimentConfig("Default", 0.1, false, 10, 0.01)
-    ResultsLogger.filePath = "logs/coffeeTest${config.experimentName}-1"
-    runLearning(mdp, config)
 }
 
 data class ExperimentConfig(
@@ -97,10 +88,10 @@ fun runLearning(trueMDP: MDP, experimentConfig: ExperimentConfig){
         val projectedPrevState = project(previousState, agentVocab)
 
         val chosenAction = if(experimentConfig.useTrue){
-            eGreedy(agentActions, truePolicy, previousState, experimentConfig.exploreAmount)
+            eGreedyWithAdvice(agentActions, truePolicy, actionAdvice, previousState, experimentConfig.exploreAmount)
         }
         else{
-            eGreedy(agentActions, agentPolicy, previousState, experimentConfig.exploreAmount)
+            eGreedyWithAdvice(agentActions, agentPolicy, actionAdvice, previousState, experimentConfig.exploreAmount)
         }
 
         println("Previous State: $previousState")
@@ -171,9 +162,6 @@ fun runLearning(trueMDP: MDP, experimentConfig: ExperimentConfig){
                 agentTrialHist[betterAction] = ArrayList()
             }
 
-            val (newValue, _) = applyExpertAdvice(agentRewardDT, agentValueTree, agentDBNInfos.mapValues{ it.value.dbn }, Pair(projectedPrevState, betterAction))
-            agentValueTree = newValue
-
 
             // Resolving misunderstandings
             if(!actionAdvice.containsKey(projectedPrevState) || actionAdvice[projectedPrevState]!!.second == betterAction){
@@ -228,8 +216,12 @@ fun runLearning(trueMDP: MDP, experimentConfig: ExperimentConfig){
     println("Done")
 }
 
-fun eGreedy(actions : Set<Action>, exploitPolicy : PolicyTree, state : RVAssignment, exploreAmount : Double) : Action {
+fun eGreedyWithAdvice(actions : Set<Action>, exploitPolicy : PolicyTree, expertAdvice : Map<RVAssignment, Pair<TimeStamp, Action>>, state : RVAssignment, exploreAmount : Double) : Action {
     if(Math.random() < 1 - exploreAmount){
+        if(state in expertAdvice){
+            return expertAdvice[state]!!.second
+        }
+
         return matchLeaf(exploitPolicy, state).value
     }
     else{
