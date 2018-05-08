@@ -7,13 +7,19 @@ import re
 
 
 def rec_show_dt(dt_node, dot):
-    print("Current Node: ", dt_node)
     node_id = str(uuid.uuid4())
-    if "branches" in dt_node:
-        dot.node(node_id, label=dt_node["rv"]["name"].upper(), shape="oval")
-        for cInd, child_node in enumerate(dt_node["branches"]):
-            child_id = rec_show_dt(child_node, dot)
-            dot.edge(node_id, child_id, label=dt_node["rv"]["domain"][cInd])
+    if "passBranch" in dt_node and "failBranch" in dt_node:
+        rv_name = dt_node["rvTest"]["first"]["name"].upper()
+        print(dt_node["rvTest"])
+        test_val = dt_node["rvTest"]["first"]["domain"][dt_node["rvTest"]["second"]]
+        dot.node(node_id, label=rv_name.upper() + "=" + test_val, shape="oval")
+        pass_child = dt_node["passBranch"]
+        pass_id = rec_show_dt(pass_child, dot)
+        dot.edge(node_id, pass_id, label="t")
+
+        fail_child = dt_node["failBranch"]
+        fail_id = rec_show_dt(fail_child, dot)
+        dot.edge(node_id, fail_id, label="f")
     else:
         dot.node(node_id, label=str(dt_node["value"]), shape="none")
     return node_id
@@ -66,15 +72,18 @@ def show_all_dep_structures(structs_folder, test_name_prefix):
                         if re.match(file_matcher, x)]
     print("Matching files: ", dep_struct_files)
     for f_name in dep_struct_files:
-        j_file = open(structs_folder + "/" + f_name)
         action_name = re.match(file_matcher, f_name).group(1)
-        dep_struct = json.load(j_file)
-        j_file.close()
+        dep_struct = load_json(structs_folder + "/" + f_name)
         show_dependency_structure(test_name_prefix, action_name, dep_struct)
 
 
-def show_policy_from_file(file_path):
+def load_json(file_path):
     j_file = open(file_path)
-    policy_tree = json.load(j_file)
+    loaded_json = json.load(j_file)
     j_file.close()
+    return loaded_json
+
+
+def show_policy_from_file(file_path):
+    policy_tree = load_json(file_path)
     show_policy_tree(os.path.splitext(file_path)[0], policy_tree)

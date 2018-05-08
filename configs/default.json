@@ -1,0 +1,15 @@
+{
+  "experimentName" : "Default",
+  "numTrials" : 4000,
+  "exploreAmount" : 0.1,
+  "useTrue" : false,
+  "expertAdviceInterval" : 10,
+  "pruneRange" : 9,
+  "dbnUpdater" : {
+    "type": "buntine",
+    "structUpdateInterval" : 100,
+    "aliveThresh" : 0.01,
+    "pseudoCountSize" : 1.0,
+    "singleParentProb" : 0.1
+  }
+}

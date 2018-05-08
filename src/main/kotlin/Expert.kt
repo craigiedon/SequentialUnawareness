@@ -39,6 +39,7 @@ fun betterActionAdvice(prevState : RVAssignment, expert : Expert) : Action{
 fun wasActionOptimal(state : RVAssignment, action : Action, qFuncs: Map<Action, QTree>) : Boolean {
     val values = qFuncs.mapValues { (_, qFunc) -> matchLeaf(qFunc, state).value }
     val bestAction = values.maxBy { it.value }!!.key
+    // Question: What if there is more than one best action? Surely you shoulnd't penalize agent for picking a different maximal action from you
     return action == bestAction
 }
 

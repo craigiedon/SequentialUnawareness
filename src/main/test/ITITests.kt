@@ -1,6 +1,6 @@
 import org.junit.*
 
-fun <T, C> makeLeaf(examples : List<T>, config : ITIUpdateConfig<T, C>, branchLabel : RVAssignment = emptyMap(), stale : Boolean = false) : ITILeaf<T,C>{
+fun <T, C> makeLeaf(examples : List<T>, config : ITIUpdateConfig<T, C>, branchLabel : Map<RVTest, Boolean> = emptyMap(), stale : Boolean = false) : ITILeaf<T,C>{
     return ITILeaf(branchLabel, createStats(examples, config), examples, classCounts(examples, config.exampleToClass), stale)
 }
 
@@ -60,8 +60,8 @@ class ITITests{
 
         val initialLeaf = makeLeaf(listOf(trial), rConfig)
 
-        val expectedPassBranch = makeLeaf(listOf(trial), rConfig, mapOf(C to 0))
-        val expectedFailBranch = makeLeaf(listOf(diffReward), rConfig, mapOf(C to 1))
+        val expectedPassBranch = makeLeaf(listOf(trial), rConfig, mapOf(Pair(C,0) to true))
+        val expectedFailBranch = makeLeaf(listOf(diffReward), rConfig, mapOf(Pair(C, 0) to false))
 
         val result = incrementalUpdate(initialLeaf, listOf(diffReward), rConfig) as RDecision
         Assert.assertEquals(Pair(C, 0), result.currentTest)
@@ -78,13 +78,13 @@ class ITITests{
             emptyMap(),
             createStats(emptyList(), rConfig),
             Pair(B, 0),
-            makeLeaf(emptyList(), rConfig, mapOf(B to 0)),
+            makeLeaf(emptyList(), rConfig, mapOf(Pair(B,0) to true)),
             RDecision(
-                mapOf(B to 1),
+                mapOf(Pair(B,0) to false),
                 createStats(emptyList(), rConfig),
                 Pair(C, 1),
-                makeLeaf(emptyList(), rConfig, mapOf(B to 1, C to 1)),
-                makeLeaf(emptyList(), rConfig, mapOf(B to 1, C to 0)),
+                makeLeaf(emptyList(), rConfig, mapOf(Pair(B,0) to false, Pair(C, 1) to true)),
+                makeLeaf(emptyList(), rConfig, mapOf(Pair(B, 0) to false, Pair(C, 1) to false)),
                 false
             ),
             false
@@ -96,18 +96,19 @@ class ITITests{
             emptyMap(),
             createStats(listOf(missingAssignments), rConfig),
             Pair(B, 0),
-            makeLeaf(emptyList(), rConfig, mapOf(B to 0)),
+            makeLeaf(emptyList(), rConfig, mapOf(Pair(B, 0) to true)),
             RDecision(
-                mapOf(B to 1),
+                mapOf(Pair(B,0) to false),
                 createStats(listOf(missingAssignments), rConfig),
                 Pair(C, 1),
-                makeLeaf(emptyList(), rConfig, mapOf(B to 1, C to 1)),
-                makeLeaf(listOf(missingAssignments), rConfig, mapOf(B to 1, C to 0), true),
+                makeLeaf(emptyList(), rConfig, mapOf(Pair(B,0) to false, Pair(C, 1) to true)),
+                makeLeaf(listOf(missingAssignments), rConfig, mapOf(Pair(B,0) to false, Pair(C, 1) to false), true),
                 stale = true),
             stale = true
         )
 
         val result = addExamples(dt, listOf(missingAssignments), rConfig)
+
         Assert.assertEquals(expected, result)
     }
 
@@ -125,8 +126,8 @@ class ITITests{
                 emptyMap(),
                 createStats(trials, rConfig),
                 Pair(C, 1),
-                makeLeaf(listOf(trials[0]), rConfig, mapOf(C to 1)),
-                makeLeaf(listOf(trials[1]), rConfig, mapOf(C to 0)),
+                makeLeaf(listOf(trials[0]), rConfig, mapOf(Pair(C,0) to true)),
+                makeLeaf(listOf(trials[1]), rConfig, mapOf(Pair(C, 0) to true)),
                 stale = true
             )
 
@@ -137,8 +138,8 @@ class ITITests{
                 emptyMap(),
                 createStats(trials, rConfig),
                 Pair(A, 0),
-                makeLeaf(listOf(trials[1]), rConfig, mapOf(A to 0), true),
-                makeLeaf(listOf(trials[0]), rConfig, mapOf(A to 1), true),
+                makeLeaf(listOf(trials[1]), rConfig, mapOf(Pair(A,0) to true), true),
+                makeLeaf(listOf(trials[0]), rConfig, mapOf(Pair(A,0) to false), true),
                 stale = true
             )
 
@@ -169,14 +170,14 @@ class ITITests{
                 topLevelStats,
                 Pair(C, 1),
                 RDecision(
-                    mapOf(C to 1),
+                    mapOf(Pair(C,1) to true),
                     subTreeStats,
                     Pair(A, 0),
-                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 1), 10.0)), rConfig, mapOf(C to 1, A to 0)),
-                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(C to 1, A to 1)),
+                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 1), 10.0)), rConfig, mapOf(Pair(C,1) to true, Pair(A,0) to true)),
+                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(Pair(C,1) to true, Pair(A,0) to false)),
                     stale = false
                 ),
-                makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(C to 0)),
+                makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(Pair(C,1) to false)),
                 stale = false
             )
 
@@ -189,8 +190,8 @@ class ITITests{
                     Pair(A, 0),
                     makeLeaf(listOf(
                         Trial(mapOf(A to 0, B to 0, C to 1), 10.0),
-                        Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(A to 0), true),
-                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(A to 1), false),
+                        Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(Pair(A,0) to true), true),
+                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(Pair(A,0) to false), false),
                     stale = true
                 )
         Assert.assertEquals(expectedTree, transposedTree)
@@ -224,19 +225,19 @@ class ITITests{
                 topLevelStats,
                 Pair(C, 1),
                 RDecision(
-                    mapOf(C to 1),
+                    mapOf(Pair(C,1) to true),
                     passStats,
                     Pair(A, 0),
-                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 1), 10.0)), rConfig, mapOf(C to 1, A to 0)),
-                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(C to 1, A to 1)),
+                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 1), 10.0)), rConfig, mapOf(Pair(C, 1) to true, Pair(A,0) to true)),
+                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(Pair(C,1) to true, Pair(A,0) to false)),
                     stale = false
                 ),
                 RDecision(
-                    mapOf(C to 0),
+                    mapOf(Pair(C,1) to false),
                     failStats,
                     Pair(A, 0),
-                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 20.0)), rConfig, mapOf(C to 0, A to 0)),
-                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 0), 25.0)), rConfig, mapOf(C to 0, A to 1)),
+                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 20.0)), rConfig, mapOf(Pair(C,1) to false, Pair(A,0) to true)),
+                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 0), 25.0)), rConfig, mapOf(Pair(C,1) to false, Pair(A, 0) to false)),
                     stale = false
                 ),
                 stale = true
@@ -260,19 +261,19 @@ class ITITests{
                 topLevelStats,
                 Pair(A, 0),
                 RDecision(
-                    mapOf(A to 0),
+                    mapOf(Pair(A,0) to true),
                     expectedPassStats,
                     Pair(C, 1),
-                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 1), 10.0)), rConfig, mapOf(A to 0, C to 1)),
-                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 20.0)), rConfig, mapOf(A to 0, C to 0)),
+                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 1), 10.0)), rConfig, mapOf(Pair(A,0) to true, Pair(C,1) to true)),
+                    makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 20.0)), rConfig, mapOf(Pair(A,0) to true, Pair(C,1) to false)),
                     stale = true
                 ),
                 RDecision(
-                    mapOf(A to 1),
+                    mapOf(Pair(A,0) to false),
                     expectedFailStats,
                     Pair(C, 1),
-                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(A to 1, C to 1)),
-                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 0), 25.0)), rConfig, mapOf(A to 1, C to 0)),
+                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 1), 15.0)), rConfig, mapOf(Pair(A,0) to false, Pair(C,1) to true)),
+                    makeLeaf(listOf(Trial(mapOf(A to 1, B to 0, C to 0), 25.0)), rConfig, mapOf(Pair(A,0) to false, Pair(C,1) to false)),
                     stale = true
                 ),
                 stale = true
@@ -300,13 +301,13 @@ class ITITests{
             emptyMap(),
             topLevelStats,
             Pair(B, 0),
-            makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(B to 0)),
+            makeLeaf(listOf(Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(Pair(B,0) to true)),
             RDecision(
-                mapOf(B to 1),
+                mapOf(Pair(B,0) to false),
                 childStats,
                 Pair(C, 1),
-                makeLeaf(listOf(Trial(mapOf(A to 1, B to 1, C to 1), 15.0)), rConfig, mapOf(B to 1, C to 1)),
-                makeLeaf(listOf(Trial(mapOf(A to 0, B to 1, C to 0), 20.0)), rConfig, mapOf(B to 1, C to 0)),
+                makeLeaf(listOf(Trial(mapOf(A to 1, B to 1, C to 1), 15.0)), rConfig, mapOf(Pair(B,0) to false, Pair(C,1) to true)),
+                makeLeaf(listOf(Trial(mapOf(A to 0, B to 1, C to 0), 20.0)), rConfig, mapOf(Pair(B,0) to false, Pair(C,1) to false)),
                 stale = true
             ),
             stale = true
@@ -314,17 +315,12 @@ class ITITests{
 
         val transposedTree = transposeTree(dt, RVTest(A, 0), rConfig.vocab, rConfig.testChecker, rConfig.exampleToClass)
 
-        val expectedChildStats = createStats(listOf(
-            Trial(mapOf(A to 0, B to 0, C to 0), 10.0),
-            Trial(mapOf(A to 0, B to 1, C to 0), 20.0)
-        ), rConfig)
-
         val expected = RDecision(
             emptyMap(),
             topLevelStats,
             Pair(A, 0),
-            makeLeaf(listOf(Trial(mapOf(A to 0, B to 1, C to 0), 20.0), Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(A to 0), true),
-            makeLeaf(listOf(Trial(mapOf(A to 1, B to 1, C to 1), 15.0)), rConfig, mapOf(A to 1), true),
+            makeLeaf(listOf(Trial(mapOf(A to 0, B to 1, C to 0), 20.0), Trial(mapOf(A to 0, B to 0, C to 0), 10.0)), rConfig, mapOf(Pair(A,0) to true), true),
+            makeLeaf(listOf(Trial(mapOf(A to 1, B to 1, C to 1), 15.0)), rConfig, mapOf(Pair(A,0) to false), true),
             stale = true
         )
 

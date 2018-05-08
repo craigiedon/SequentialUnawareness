@@ -10,11 +10,13 @@ buildscript {
     }
 }
 
+apply plugin: 'idea'
 apply plugin: 'java'
 apply plugin: 'kotlin'
-apply plugin: 'idea'
+apply plugin: 'application'
+apply plugin: 'groovy'
+apply plugin: 'distribution'
 
-sourceCompatibility = 1.5
 
 repositories {
     mavenCentral()
@@ -36,5 +38,14 @@ idea {
     module {
         sourceDirs += file('src/main/kotlin')
         testSourceDirs += file('src/main/test')
+    }
+}
+
+mainClassName = "MainKt"
+
+jar {
+    manifest {
+        attributes 'Main-Class': "MainKt",
+                'Class-Path': configurations.runtime.files.collect {"$it.name"}.join(' ')
     }
 }

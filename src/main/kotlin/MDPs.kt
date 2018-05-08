@@ -5,6 +5,7 @@ data class MDP(val vocab : Set<RandomVariable>,
                val actions : Set<Action>,
                val dbns : Map<Action, DynamicBayesNet>,
                val discount : Double,
+               val startStateDescriptions : List<RVAssignment> = emptyList(),
                val terminalDescriptions : List<RVAssignment> = emptyList()){
     val dbnStructs : Map<Action, DBNStruct> get() = dbns.mapValues { dbnStruct(it.value) }
     val rewardScope : Set<RandomVariable> get() = vocabInDT(rewardTree)
@@ -23,35 +24,31 @@ fun simpleBoutillier() : MDP {
 
     val xCPD = identityTransition(X)
     val wCPD = identityTransition(W)
-    val yCPD = DTDecision(Y, listOf(
-        DTDecision(X, listOf(
+    val yCPD = DTDecision(Pair(Y,0),
+        DTDecision(Pair(X,0),
             DTLeaf(detFactor(Y, 0)),
             DTLeaf(Factor(listOf(Y), listOf(0.1, 0.9)))
-        )),
+        ),
         DTLeaf(detFactor(Y, 1))
-    ))
-    val zCPD = DTDecision(Z, listOf(
-        DTDecision(Y, listOf(
+    )
+    val zCPD = DTDecision(Pair(Z,0),
+        DTDecision(Pair(Y,0),
             DTLeaf(detFactor(Z, 0)),
             DTLeaf(Factor(listOf(Z), listOf(0.1, 0.9)))
-        )),
+        ),
         DTLeaf(detFactor(Z, 1))
-    ))
+    )
 
-    val rewardTree = DTDecision(Z, listOf(
+    val rewardTree = DTDecision(Pair(Z,0),
         DTLeaf(0.0),
         DTLeaf(10.0)
-    ))
+    )
 
     val cpdTrees = mapOf(X to xCPD, Y to yCPD, W to wCPD, Z to zCPD)
     val actions = setOf("A1")
     val dbns = mapOf("A1" to cpdTrees)
 
     return MDP(vocab, rewardTree, actions, dbns, 0.99)
-}
-
-fun identityTransitionDBN(vocab : Set<RandomVariable>, noise : Double = 0.0) : DynamicBayesNet {
-    return vocab.associate { rv -> Pair(rv, identityTransition(rv, noise)) }
 }
 
 fun loadMDP(jsonFilePath : String) : MDP{
@@ -80,19 +77,28 @@ fun loadMDP(jsonFilePath : String) : MDP{
 
     val discount : Double = jsonNode.get("discount").asDouble()
 
-    val terminalDescriptions : List<RVAssignment> = jsonNode.get("terminalDescriptions")
+    val terminalDescriptions = extractStateDescriptions(jsonNode, vocab, "terminalDescriptions")
+    val startStateDescriptions = extractStateDescriptions(jsonNode, vocab, "startStates")
+
+    return MDP(vocab.values.toSet(), rewardTree, actionNames, dbns, discount, startStateDescriptions, terminalDescriptions)
+}
+
+fun extractStateDescriptions(jsonNode : JsonNode, vocab : Map<String, RandomVariable>, fieldName : String) : List<RVAssignment>{
+    if(!jsonNode.has(fieldName)){
+        return emptyList()
+    }
+
+    return jsonNode.get(fieldName)
         .asSequence()
-        .map{ terminalDescription ->
-            terminalDescription.fields()
+        .map { stateDescription ->
+            stateDescription.fields()
                 .asSequence()
                 .associate { (rvString, nodeVal) ->
                     val rv = vocab[rvString]!!
                     val domVal = nodeVal.asText()
-                    Pair(rv, rv.domain.indexOf(domVal)) }
-
+                    Pair(rv, rv.domain.indexOf(domVal))
+                }
         }.toList()
-
-    return MDP(vocab.values.toSet(), rewardTree, actionNames, dbns, discount, terminalDescriptions)
 }
 
 fun parseProbTree(jsonProbNode : JsonNode, rv : RandomVariable, vocab : Map<String, RandomVariable>) : DecisionTree<Factor>{
@@ -106,8 +112,8 @@ fun parseProbTree(jsonProbNode : JsonNode, rv : RandomVariable, vocab : Map<Stri
     }
     val (varName, decisionNode) = jsonProbNode.fields().next()
     val decisionVar = vocab[varName]!!
-    val branches = decisionVar.domain.map { parseProbTree(decisionNode.get(it), rv, vocab) }
-    return DTDecision(decisionVar, branches)
+    val branches = decisionVar.domain.withIndex().associate { (i, domVal) -> Pair(i, parseProbTree(decisionNode.get(domVal), rv, vocab)) }
+    return dtFromBranchMap(decisionVar, branches)
 }
 
 fun parseRewardTree(jsonRewardNode : JsonNode, vocab : Map<String, RandomVariable>) : DecisionTree<Reward> {
@@ -117,18 +123,31 @@ fun parseRewardTree(jsonRewardNode : JsonNode, vocab : Map<String, RandomVariabl
 
     val (varName, decisionNode) = jsonRewardNode.fields().next()
     val rv = vocab[varName]!!
-    val branches = rv.domain.map { parseRewardTree(decisionNode.get(it), vocab) }
-    return DTDecision(rv, branches)
+    val branches = rv.domain.withIndex().associate { (i, domVal) -> Pair(i, parseRewardTree(decisionNode.get(domVal), vocab)) }
+    return dtFromBranchMap(rv, branches)
 }
 
-fun generateInitialState(vocab : List<RandomVariable>, terminalDescriptions : List<RVAssignment>) : RVAssignment {
-    if(terminalDescriptions.any{ !vocab.containsAll(it.keys)}){
-        throw IllegalArgumentException("Terminal State Descriptions contain vocabulary not present in given vocab")
+fun <T> dtFromBranchMap(rv : RandomVariable, branchMap : Map<Int, DecisionTree<T>>): DecisionTree<T>{
+    fun dtFromBranchMapRec(branchesLeft : List<Int>) : DecisionTree<T>{
+        if(branchesLeft.size == 1){
+            return branchMap[branchesLeft[0]]!!
+        }
+        return DTDecision(Pair(rv, branchesLeft[0]), branchMap[branchesLeft[0]]!!, dtFromBranchMapRec(branchesLeft.drop(1)))
+    }
+    return dtFromBranchMapRec(branchMap.keys.toList())
+}
+
+fun generateInitialState(vocab : List<RandomVariable>, startStateDescriptions: List<RVAssignment>, terminalDescriptions : List<RVAssignment>) : RVAssignment {
+    if(terminalDescriptions.any{ !vocab.containsAll(it.keys)} || startStateDescriptions.any { !vocab.containsAll(it.keys) }){
+        throw IllegalArgumentException("State Descriptions contain vocabulary not present in given vocab")
     }
 
     while(true){
         val potentialSample = generateSample(vocab)
-        if(terminalDescriptions.none { td -> partialMatch(td, potentialSample) }){
+        val nonTerminal = terminalDescriptions.none { td -> partialMatch(td, potentialSample) }
+        val matchesStartRequirement = startStateDescriptions.isEmpty() || startStateDescriptions.any { sd -> partialMatch(sd, potentialSample) }
+
+        if(nonTerminal && matchesStartRequirement){
             return potentialSample
         }
     }

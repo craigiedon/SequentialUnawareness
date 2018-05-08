@@ -1,12 +1,12 @@
-import Utils.allEqual
-import Utils.concat
-import Utils.productBy
+import Utils.product
 import Utils.productByDouble
 import com.google.ortools.constraintsolver.Decision
+import javax.swing.text.html.parser.DTD
+import kotlin.streams.toList
 
 sealed class DecisionTree<T>
 data class DTLeaf<T>(val value: T) : DecisionTree<T>()
-data class DTDecision<T>(val rv: RandomVariable, val branches : List<DecisionTree<T>>) : DecisionTree<T>()
+data class DTDecision<T>(val rvTest: RVTest, val passBranch : DecisionTree<T>, val failBranch : DecisionTree<T>) : DecisionTree<T>()
 
 typealias NaiveFactors = Map<RandomVariable, Factor>
 typealias Action = String
@@ -17,142 +17,119 @@ typealias PolicyTree = DecisionTree<Action>
 fun <T> vocabInDT(dt : DecisionTree<T>) : PSet =
     when(dt){
         is DTLeaf -> emptySet()
-        is DTDecision -> dt.branches.flatMap { vocabInDT(it) }.toSet() + dt.rv
+        is DTDecision -> vocabInDT(dt.passBranch) + vocabInDT(dt.failBranch) + dt.rvTest.first
     }
 
-fun <T> leavesWithHistory(decisionTree: DecisionTree<T>, currentHistory : RVAssignment = emptyMap()) : List<Pair<RVAssignment, DTLeaf<T>>>{
-    when(decisionTree){
-        is DTLeaf<T> -> return listOf(Pair(currentHistory, decisionTree))
-        is DTDecision<T> -> return decisionTree.branches
-            .mapIndexed { x, node -> leavesWithHistory(node, currentHistory + Pair(decisionTree.rv, x)) }
-            .flatten()
+fun <T> leaves(dt : DecisionTree<T>) : List<DTLeaf<T>> =
+   when(dt){
+       is DTLeaf<T> -> listOf(dt)
+       is DTDecision -> leaves(dt.passBranch) + leaves(dt.failBranch)
+   }
+
+fun <T> leavesWithHistory(dt: DecisionTree<T>, currentHistory : Map<RVTest, Boolean> = emptyMap()) : List<Pair<Map<RVTest, Boolean>, DTLeaf<T>>> =
+    when(dt){
+        is DTLeaf<T> -> listOf(Pair(currentHistory, dt))
+        is DTDecision<T> -> leavesWithHistory(dt.passBranch, currentHistory + Pair(dt.rvTest, true)) +
+                            leavesWithHistory(dt.failBranch, currentHistory + Pair(dt.rvTest,false))
     }
-}
 
 
 fun <T, S> foldTree (dTree : DecisionTree<T>, initial : S, accFunc : (S, T) -> S) : S =
     when(dTree){
         is DTLeaf -> accFunc(initial, dTree.value)
-        is DTDecision -> dTree.branches.fold(initial, {maxSoFar, dt -> foldTree(dt, maxSoFar, accFunc)})
+        is DTDecision -> {
+            val foldedPass = foldTree(dTree.passBranch, initial, accFunc)
+            foldTree(dTree.failBranch, foldedPass, accFunc)
+        }
     }
 
 typealias DynamicBayesNet = Map<RandomVariable, DecisionTree<Factor>>
 
-// Note, this assumes that all the random variables in your problem are binary, so conversion from binary test to assignments is trivial.
-// To handle many values RVs, we will have to do something a bit more complicated
-fun convertFromITI(binaryRTree : RewardNode) : DecisionTree<Reward> =
-    when(binaryRTree){
+fun convertFromITI(itiTree: RewardNode) : DecisionTree<Reward> =
+    when(itiTree){
         is RLeaf -> {
-            val averageReward = if(binaryRTree.examples.isEmpty()){
+            val averageReward = if(itiTree.examples.isEmpty()){
                 0.0
             }
             else{
-                binaryRTree.examples.map { it.reward }.average()
+                itiTree.examples.map { it.reward }.average()
             }
             DTLeaf(averageReward)
 
         } // This would be quicker if these stats had been pre-computed at leaf
-        is RDecision -> {
-            val orderedBranches = if(binaryRTree.currentTest.second == 0){
-                listOf(binaryRTree.passBranch, binaryRTree.failBranch)
-            }
-            else{
-                listOf(binaryRTree.failBranch, binaryRTree.passBranch)
-            }
-            DTDecision(binaryRTree.currentTest.first, orderedBranches.map(::convertFromITI))
-        }
+        is RDecision -> DTDecision(
+            itiTree.currentTest,
+            convertFromITI(itiTree.passBranch),
+            convertFromITI(itiTree.failBranch)
+        )
     }
 
-fun convertToCPT(childRV: RandomVariable, binaryPTree: ProbNode, jointParamPrior : DecisionTree<Factor>, pseudoCountStrength: Double) : DecisionTree<Factor> =
-    when(binaryPTree){
+fun convertToCPT(childRV: RandomVariable, itiTree: ProbNode, jointParamPrior : DecisionTree<Factor>, pseudoCountStrength: Double) : DecisionTree<Factor> =
+    when(itiTree){
         is ITILeaf -> {
-            val relevantPrior = jointQuery(binaryPTree.branchLabel, jointParamPrior)
-            val bestParams = maxPosteriorParams(childRV, binaryPTree.counts, relevantPrior, pseudoCountStrength)
+            val relevantPrior = jointQuery(itiTree.branchLabel, jointParamPrior)
+            val bestParams = maxPosteriorParams(childRV, itiTree.counts, relevantPrior, pseudoCountStrength)
             DTLeaf(bestParams)
         }
-        is ITIDecision -> {
-            if(binaryPTree.currentTest.first.domainSize != 2){
-                throw NotImplementedError("Can't yet handle non-binary variables")
-            }
-            val orderedBranches = if(binaryPTree.currentTest.second == 0){
-                listOf(binaryPTree.passBranch, binaryPTree.failBranch)
-            }
-            else{
-                listOf(binaryPTree.failBranch, binaryPTree.passBranch)
-            }
-            DTDecision(binaryPTree.currentTest.first, orderedBranches.map{ branch -> convertToCPT(childRV, branch, jointParamPrior, pseudoCountStrength) } )
-        }
+        is ITIDecision -> DTDecision(itiTree.currentTest,
+            convertToCPT(childRV, itiTree.passBranch, jointParamPrior, pseudoCountStrength),
+            convertToCPT(childRV, itiTree.failBranch, jointParamPrior, pseudoCountStrength)
+        )
     }
 
 // Take a decision tree for joint probabilities, find all leaves that match assignment, and combine them
 // For leaves that make no assignment to some vars in parent assignment, assume counts would be uniformly distributed over missing context
-fun jointQuery(parentAssgn : RVAssignment, jointDT: DecisionTree<Factor>) : Factor{
-    fun jointQueryRec(dt : DecisionTree<Factor>, assignmentSoFar: RVAssignment) : Factor =
+fun jointQuery(parentAssgn : Map<RVTest, Boolean>, jointDT: DecisionTree<Factor>) : Factor{
+    fun jointQueryRec(dt : DecisionTree<Factor>, matchedTests: Set<RVTest>) : Factor =
         when(dt){
             is DTLeaf -> {
-                val unmatchedContext = (parentAssgn.keys - assignmentSoFar.keys).toList()
-                val divAmount = unmatchedContext.productByDouble { it.domainSize.toDouble() }
+                val unmatchedTests = (parentAssgn.keys - matchedTests)
+                val divAmount = Math.pow(2.0, unmatchedTests.size.toDouble())
                 val scaledVals = dt.value.values.map { it / divAmount }
                 Factor(dt.value.scope, scaledVals)
             }
             is DTDecision -> {
-                if(parentAssgn.containsKey(dt.rv)){
-                    val rvVal = parentAssgn[dt.rv]!!
-                    jointQueryRec(dt.branches[rvVal], assignmentSoFar + Pair(dt.rv, rvVal))
+                if(parentAssgn.contains(dt.rvTest)){
+                    // Maybe here you could add a special case for the binary situation. I.e that you can mirror assignments
+                    when(parentAssgn[dt.rvTest]!!){
+                        true -> jointQueryRec(dt.passBranch, matchedTests + dt.rvTest)
+                        false -> jointQueryRec(dt.failBranch, matchedTests + dt.rvTest)
+                    }
                 }
                 else{
-                    add(dt.branches.map { jointQueryRec(it, assignmentSoFar) })
+                    add(listOf(
+                        jointQueryRec(dt.passBranch, matchedTests),
+                        jointQueryRec(dt.failBranch, matchedTests))
+                    )
                 }
             }
         }
-    return jointQueryRec(jointDT, emptyMap())
+    return jointQueryRec(jointDT, emptySet())
 }
 
-fun convertToJointProbTree(rv : RandomVariable, binaryPTree : ProbNode, priorJointDT: DecisionTree<Factor>, psuedoCountStrength : Double) : DecisionTree<Factor> {
-    val totalTrials = when(binaryPTree){
-        is PLeaf -> binaryPTree.examples.size
+fun convertToJointProbTree(rv : RandomVariable, itiNode: ProbNode, priorJointDT: DecisionTree<Factor>, psuedoCountStrength : Double) : DecisionTree<Factor> {
+    val totalTrials = when(itiNode){
+        is PLeaf -> itiNode.examples.size
         is PDecision -> {
-            val testStat = binaryPTree.testCandidates[binaryPTree.currentTest]!!
+            val testStat = itiNode.testCandidates[itiNode.currentTest]!!
             testStat.passTrialCounts.values.sum() + testStat.failTrialCounts.values.sum()
         }
     }
 
-    fun convertToJointProbTreeRec(pt : ProbNode, parentAssgn: RVAssignment) :DecisionTree<Factor> =
+    fun convertToJointProbTreeRec(pt : ProbNode) :DecisionTree<Factor> =
         when(pt){
             is ITILeaf -> {
-                val jointPriorParam = jointQuery(parentAssgn, priorJointDT)
+                val jointPriorParam = jointQuery(pt.branchLabel, priorJointDT)
                 val realCounts = rv.domain.indices.map { (pt.counts[it] ?: 0)}
                 val scaledCombined = rv.domain.indices.map { (realCounts[it] + (jointPriorParam.values[it] * psuedoCountStrength)) / (totalTrials + psuedoCountStrength)}
                 DTLeaf(Factor(listOf(rv), scaledCombined))
             }
-            is ITIDecision -> {
-                if(rv.domainSize != 2){
-                    throw NotImplementedError("Can't yet handle non-binary variables")
-                }
-                val orderedBranches = if(pt.currentTest.second == 0){
-                    listOf(pt.passBranch, pt.failBranch)
-                }
-                else{
-                    listOf(pt.failBranch, pt.passBranch)
-                }
-                DTDecision(rv, orderedBranches.mapIndexed { i, branch -> convertToJointProbTreeRec(branch, parentAssgn + Pair(rv, i)) })
-            }
+            is ITIDecision -> DTDecision(pt.currentTest,
+                convertToJointProbTreeRec(pt.passBranch),
+                convertToJointProbTreeRec(pt.failBranch)
+            )
         }
-    return convertToJointProbTreeRec(binaryPTree, emptyMap())
-}
-
-fun <T> matchingAssignments(partialAssignment : RVAssignment, fullAssignments : Map<RVAssignment, T>) : List<T>{
-    if(fullAssignments.isEmpty()){
-        return emptyList()
-    }
-    val fullAssgnVars = fullAssignments.keys.first().keys
-    val partialVars = partialAssignment.keys
-    if(!fullAssgnVars.containsAll(partialVars)){
-        throw IllegalArgumentException("Partial assignment keys must be subset of full assignment keys")
-    }
-    val completionVars = fullAssgnVars - partialVars
-    return allAssignments(completionVars.toList())
-        .map { cAssgn -> fullAssignments[partialAssignment + cAssgn]!! }
+    return convertToJointProbTreeRec(itiNode)
 }
 
 fun partialMatch(partialAssignment: RVAssignment, fullAssignment : RVAssignment) =
@@ -165,169 +142,331 @@ fun maxPosteriorParams(rv : RandomVariable, counts : Map<Int, Int>, priorParams 
     return Factor(listOf(rv), bestParams)
 }
 
-fun  regressPolicy(valTree: DecisionTree<Double>, rewardTree : DecisionTree<Double>, policyTree : DecisionTree<Action>, actionDBNs : Map<Action, DynamicBayesNet>) : DecisionTree<Double>{
-    val qTrees = actionDBNs.mapValues { regress(valTree, rewardTree, it.value) }
-    val compPolicyVal = replaceLeaves(policyTree, qTrees)
-    val policyVals = simplify(compPolicyVal, ::doubleEquality)
-    return policyVals
-}
-
-/*
-fun structuredSuccessiveApproximation(rewardTree : DecisionTree<Double>, policyTree : DecisionTree<Action>, actionDBNs : Map<Action, DynamicBayesNet>) : DecisionTree<Double> {
-    var valueTree = rewardTree
+fun structuredValueIteration(rewardTree : DecisionTree<Double>, actionDBNs: Map<Action, DynamicBayesNet>, vocab : List<RandomVariable>, pruneRange: Double = 0.0) : Pair<PolicyTree, VTree>{
+    var rangedValTree : DecisionTree<Range> = toRanged(rewardTree)
+    val testOrder : List<RVTest> = vocab.flatMap { rv -> rv.domain.indices.map { RVTest(rv, it)} }
     do{
-        val newValueTree = regressPolicy(valueTree, rewardTree, policyTree, actionDBNs)
-        val diffTree = append(valueTree, newValueTree, {a, b -> Math.abs(a - b)}, ::doubleEquality)
+        val qTreesRanged = actionDBNs.map { (a,dbn) ->
+            println("Action $a:")
+            regressRanged(rangedValTree, rewardTree, dbn) }
+
+
+
+        val orderedQs = qTreesRanged.map { setOrder(it, testOrder) }
+        val mergedQTrees = simplify(orderedMerge(testOrder, orderedQs, ::rangeCeilings), ::doubleEquality)
+        val newValueTree = reOrderDT(mergedQTrees)
+        val prunedValueTree = prune(newValueTree, pruneRange)
+
+        val diffTree = append(rangedValTree, newValueTree, ::rangeDistance, ::doubleEquality)
         val biggestDiff = foldTree(diffTree, 0.0, ::maxOf)
 
-        valueTree = newValueTree
-    }
-    while(biggestDiff < 0.001)
-    return valueTree
-}
-*/
+        rangedValTree = prunedValueTree
 
-/*
-fun structuredPolicyIteration(rewardTree : DecisionTree<Double>, actionDBNs : Map<Action, DynamicBayesNet>) : DecisionTree<Action>{
-    var currentPolicy : DecisionTree<Action> = DTLeaf(actionDBNs.keys.first()) // Start by deterministically doing action 0 in every state
-    do{
-        val valueTree = structuredSuccessiveApproximation(rewardTree, currentPolicy, actionDBNs)
-        val qVals = actionDBNs.mapValues { regress(valueTree, rewardTree, it.value) }
-        val newPolicy = choosePolicy(qVals)
 
-        val policyChanged = newPolicy != currentPolicy
-
-        currentPolicy = newPolicy
-    } while (policyChanged)
-    return currentPolicy
-}
-*/
-
-fun structuredValueIteration(rewardTree : DecisionTree<Double>, actionDBNs: Map<Action, DynamicBayesNet>) : Pair<PolicyTree, VTree>{
-    var valueTree = rewardTree
-    do{
-        val qTrees = actionDBNs.map { regress(valueTree, rewardTree, it.value) }
-        val newValueTree = merge(qTrees, ::maxOf, ::doubleEquality)
-
-        val diffTree = append(valueTree, newValueTree, {a, b -> Math.abs(a - b)}, ::doubleEquality)
-        val biggestDiff = foldTree(diffTree, 0.0, ::maxOf)
-
-        valueTree = newValueTree
+        println("Num Vals: Before Prune : ${numLeaves(newValueTree)} After Prune : ${numLeaves(prunedValueTree)}")
+        println("Biggest Diff : $biggestDiff")
+        println()
     } while(biggestDiff > 0.01)
 
-    val finalQTrees = actionDBNs.mapValues { regress(valueTree, rewardTree, it.value) }
-    val finalPolicy = choosePolicy(finalQTrees)
-    return Pair(finalPolicy, valueTree)
+    val finalQTrees = actionDBNs.mapValues { regressRanged(rangedValTree, rewardTree, it.value) }
+    val finalPolicy = choosePolicy(finalQTrees, vocab)
+    return Pair(finalPolicy, fromRanged(rangedValTree))
 }
 
-fun incrementalSVI(rewardTree : DecisionTree<Double>, valueTree : DecisionTree<Double>, actionDBNs : Map<Action, DynamicBayesNet>, pruningThresh : Double = 0.0) : Pair<VTree, Map<Action, QTree>>{
-    val reOrderedValueTree = reOrderDT(valueTree)
-    val prunedValueTree = prune(reOrderedValueTree, pruningThresh)
-
-    val qTrees = actionDBNs.mapValues { regress (prunedValueTree, rewardTree, it.value) }
-    val newValueTree = merge(qTrees.values, ::maxOf, ::doubleEquality)
-    return Pair(newValueTree, qTrees)
+fun rangeCeilings(r1 : Range, r2: Range) : Range{
+    return Range(maxOf(r1.lower, r2.lower), maxOf(r1.upper, r2.upper))
 }
 
-fun applyExpertAdvice(rewardTree : DecisionTree<Double>, valueTree : DecisionTree<Double>, actionDBNs : Map<Action, DynamicBayesNet>, actionAdvice: Pair<RVAssignment, Action>) : Pair<VTree, Map<Action, QTree>> {
-    val qTrees = actionDBNs.mapValues { regress (valueTree, rewardTree, it.value) }.toMutableMap()
+fun rangeDistance(r1 : Range, r2 : Range) : Double{
+    if(r1.upper < r2.lower){
+        return r2.lower - r1.upper
+    }
+    if(r2.upper < r1.lower){
+        return r1.lower - r2.upper
+    }
 
-    val bestVal : Double = qTrees
-        .map{ (_, qTree) -> matchLeaf(qTree, actionAdvice.first) }
-        .maxBy { leaf -> leaf.value}!!.value
-
-    qTrees[actionAdvice.second] = replaceLeafValue(qTrees[actionAdvice.second]!!, actionAdvice.first, bestVal)
-
-    val newValueTree = merge(qTrees.values, ::maxOf, ::doubleEquality)
-    return Pair(newValueTree, qTrees)
+    return 0.0
 }
 
-fun choosePolicy(qTrees : Map<Action, DecisionTree<Double>>) : PolicyTree {
-    val annotatedActionQs = qTrees.map {(a, qt) -> fMap(qt, {qVal -> Pair(a, qVal)})}
-    val annotatedPolicy = merge(annotatedActionQs, ::maxBySecond, {a, b -> a == b})
+data class Range(val lower : Double, val upper : Double)
+
+fun <T> penultimateNodes(dt: DecisionTree<T>) : List<DTDecision<T>> =
+    when(dt){
+        is DTLeaf -> emptyList()
+        is DTDecision ->
+            if(dt.passBranch is DTLeaf && dt.failBranch is DTLeaf) listOf(dt)
+            else penultimateNodes(dt.passBranch) + penultimateNodes(dt.failBranch)
+    }
+
+fun incrementalSVI(rewardTree : DecisionTree<Double>,
+                   valueTree : DecisionTree<Range>,
+                   actionDBNs : Map<Action, DynamicBayesNet>,
+                   vocab : List<RandomVariable>,
+                   pruningRange: Double = 0.0) : Pair<DecisionTree<Range>, Map<Action, DecisionTree<Range>>>{
+
+    val qTrees = actionDBNs.entries
+        //.parallelStream()
+        .map { (action, dbn) -> Pair(action, regressRanged (valueTree, rewardTree, dbn)) }
+        .toList()
+        .associate { it }
+
+    println("Merging")
+
+    val testOrder = vocab.flatMap { rv -> rv.domain.indices.map { RVTest(rv, it) } }
+    val orderedQVals = qTrees.mapValues { setOrder(it.value, testOrder) }
+
+    val newValueTree = reOrderDT(simplify(orderedMerge(testOrder, orderedQVals.values.toList(), ::rangeCeilings), ::doubleEquality))
+    val finalValTree = prune(newValueTree, pruningRange)
+
+    println("Val tree size: Before Pruning ${numLeaves(newValueTree)} After Pruning: ${numLeaves(finalValTree)}")
+    return Pair(finalValTree, qTrees)
+}
+
+
+fun choosePolicy(qTrees : Map<Action, DecisionTree<Range>>, vocab : List<RandomVariable>) : PolicyTree {
+    val testOrder = vocab.flatMap { rv -> rv.domain.indices.map { RVTest(rv, it) } }
+    val orderedQVals = qTrees.mapValues { fromRanged(setOrder(it.value, testOrder)) }
+
+
+    val annotatedActionQs = orderedQVals.map {(a, qt) -> fMap(qt, {qVal -> Pair(a, qVal)})}
+    val annotatedPolicy = orderedMerge(testOrder, annotatedActionQs, ::maxBySecond)
     val unsimplifiedPolicy = fMap(annotatedPolicy, {(action, _) -> action})
-    return simplify(unsimplifiedPolicy, {a1, a2 -> a1 == a2 })
+    val simplifiedPolicy = simplify(unsimplifiedPolicy, {a1, a2 -> a1 == a2 })
+    return simplifiedPolicy
 }
+
+/*
+fun reOrderPolicy(dt : DecisionTree<Action>) : DecisionTree<Action> {
+    when(dt){
+        is DTLeaf -> return dt
+        is DTDecision -> {
+            val dtTests = getAllTests(dt)
+            val varActionCounts = actionsForVarSplits(dtTests, dt)
+            val varEntropies = varActionCounts.mapValues { (_, actionCounts) -> intEntropy(actionCounts) }
+            val (bestTest, _) = varEntropies.maxBy { it.value }!!
+
+            val transposedTree = transposeTree(dt, bestTest)
+            return when(transposedTree){
+                is DTLeaf -> transposedTree
+                is DTDecision -> transposedTree.copy(passBranch = reOrderPolicy(transposedTree.passBranch), failBranch = reOrderPolicy(transposedTree.failBranch))
+            }
+        }
+    }
+}
+*/
+
+/*
+fun actionsForVarSplits(tests : Set<RVTest>, dt : DecisionTree<Action>) : Map<RVTest, List<Int>>{
+    val actionSplits = tests
+        .associate { rvTest -> Pair(rvTest, listOf(false, true)
+            .map { emptySet<Action>() }
+            .toMutableList())
+        }
+        .toMutableMap()
+
+    fun splitsForVarsRec(node : DecisionTree<Action>, branchLabel : Map<RVTest, Boolean>){
+        when(node){
+            is DTLeaf -> {
+                for(rvTest in tests){
+                    val rvSplit = actionSplits[rvTest]!!
+                    if(branchLabel.containsKey(rvTest)){
+                        val testLabel = if(branchLabel[rvTest]!!) 1 else 0
+                        rvSplit[testLabel] = rvSplit[testLabel] + node.value
+                    }
+                    else{
+                        actionSplits[rvTest] = rvSplit.map { it + node.value }.toMutableList()
+                    }
+                }
+            }
+            is DTDecision -> {
+                splitsForVarsRec(node.passBranch, branchLabel + Pair(node.rvTest, true))
+                splitsForVarsRec(node.failBranch, branchLabel + Pair(node.rvTest, false))
+            }
+        }
+    }
+
+    splitsForVarsRec(dt, emptyMap())
+    return actionSplits.mapValues { it.value.map { it.size } }
+}
+*/
 
 fun <T, S : Comparable<S>> maxBySecond(p1 : Pair<T,S>, p2 : Pair<T, S>) =
     if(p1.second >= p2.second) p1 else p2
 
-fun replaceLeaves(policyTree : DecisionTree<Action>, qTrees : Map<Action, DecisionTree<Double>>) : DecisionTree<Double>{
-    return when(policyTree){
-        is DTLeaf -> qTrees[policyTree.value]!!
-        is DTDecision -> DTDecision(policyTree.rv, policyTree.branches.map { replaceLeaves(it, qTrees) })
-    }
-}
 
-fun <T> replaceLeafValue(dt : DecisionTree<T>, context : RVAssignment, replacementValue : T) : DecisionTree<T> =
-    when(dt){
-        is DTLeaf -> { dt.copy(value = replacementValue)}
-        is DTDecision -> {
-            dt.copy(branches = dt.branches.mapIndexed { i, branch ->
-                if(context[dt.rv]!! == i) replaceLeafValue(branch, context, replacementValue) else branch
-            })
-        }
+fun regressRanged(rangedValTree : DecisionTree<Range>, rewardTree : DecisionTree<Double>, dbn: DynamicBayesNet) : DecisionTree<Range> {
+    val discountFactor = 0.9
+    val vTreeSize = numLeaves(rangedValTree)
+    val vTreeVocab = vocabInDT(rangedValTree)
+
+    val pTree = pRegress(rangedValTree, dbn)
+    val pTreeSize = numLeaves(pTree)
+
+    println("Actual PTree Size: $pTreeSize")
+    println("FV Calc is : Val Tree $vTreeSize * PTree: $pTreeSize = ${vTreeSize * pTreeSize}")
+
+    val maxPrev = leaves(rangedValTree).map { it.value.upper }.max()!!
+    val fvTree = undiscountedFutureValueRanged(rangedValTree, pTree)
+    if(leaves(fvTree).any { it.value.upper > maxPrev }){
+        println("Shouln't be possible: future value is a weighted average of other values")
     }
+    val madnessNum = 1000.0
+    if(leaves(fvTree).any { it.value.lower > madnessNum || it.value.upper > madnessNum }){
+        println("Madness!")
+    }
+    val rewardRange = toRanged(rewardTree)
+    val newTree = append(fvTree, rewardRange,
+        { (vLower, vUpper), (rLower, rUpper) -> Range(discountFactor * vLower + rLower, discountFactor * vUpper + rUpper)},
+        ::doubleEquality)
+
+    if(leaves(newTree).any { it.value.lower > madnessNum || it.value.upper > madnessNum }){
+        println("Madness")
+    }
+    return newTree
+}
 
 fun regress(valTree : DecisionTree<Double>, rewardTree : DecisionTree<Double>, dbn : DynamicBayesNet) :  QTree {
     val discountFactor = 0.9
+
     val pTree = pRegress(valTree, dbn)
+
     val fvTree = undiscountedFutureValue(valTree, pTree)
     val newTree = append(fvTree, rewardTree, {v, r -> discountFactor * v + r}, ::doubleEquality)
+    /*
+    println("pTree Size: ${numLeaves(pTree)}")
+    println("fvTree Size: ${numLeaves(fvTree)}")
+    println("newTree Size: ${numLeaves(newTree)}")
+    */
     return newTree
 }
 
 
 fun undiscountedFutureValue(valueTree : DecisionTree<Double>, pTree : DecisionTree<NaiveFactors>) : DecisionTree<Double>{
-    val vTreeBranches = leavesWithHistory(valueTree)
-    val undiscountedVals = fMap(pTree, { pLeaf -> vTreeBranches
-        .sumByDouble { (branchHist, vLeaf) -> vLeaf.value * probability(branchHist, pLeaf) }
+    val vTreeWithAssign = withBranchAssignments(valueTree)
+    val vLeaves = leaves(vTreeWithAssign)
+    val undiscountedVals = fMap(pTree, { pLeaf ->
+        vLeaves.parallelStream()
+            .map { vLeaf -> vLeaf.value.second * probability(vLeaf.value.first, pLeaf) }
+            .reduce(0.0, { d1, d2 -> d1 + d2  })
     })
     return undiscountedVals
 }
 
-fun probability(assignment : RVAssignment, factorMap : NaiveFactors) : Double{
-    return assignment
-        .filterKeys { rv -> rv in factorMap }
-        .map{ (rv, i) -> factorMap[rv]!!.values[i] }.productByDouble { it }
+fun undiscountedFutureValueRanged(rangedValTree : DecisionTree<Range>, pTree : DecisionTree<NaiveFactors>) : DecisionTree<Range>{
+    val vTreeWithAssign = withBranchAssignments(rangedValTree)
+    val vLeaves = leaves(vTreeWithAssign)
+
+
+    val undiscountedVals = fMap(pTree, { pLeaf ->
+        vLeaves.parallelStream()
+            .map { vLeaf ->
+                val (vAssgn, vRange) = vLeaf.value
+                val prob = probability(vAssgn, pLeaf)
+                Pair(Range(vRange.lower * prob, vRange.upper * prob), prob)
+            }
+            .reduce(Pair(Range(0.0,0.0), 0.0), { rp1, rp2 -> Pair(add(rp1.first, rp2.first), rp1.second + rp2.second)})
+    })
+
+    val overProbLeaf = leavesWithHistory(undiscountedVals).find { it.second.value.second > 1.0 }
+    if(overProbLeaf != null){
+        println("Over prob leaf!")
+    }
+
+    return fMap(undiscountedVals, { leaf -> leaf.first })
+}
+
+fun add(r1 : Range, r2 : Range) = Range(r1.lower + r2.lower, r1.upper + r2.upper)
+
+typealias RVAssignmentDisj = Map<RandomVariable, List<Int>>
+fun <T> withBranchAssignments(dt : DecisionTree<T>) : DecisionTree<Pair<RVAssignmentDisj, T>> {
+    fun withBranchRec(node : DecisionTree<T>, groupedBranchLabel: Map<RandomVariable, List<Pair<RVTest, Boolean>>>) : DecisionTree<Pair<RVAssignmentDisj, T>>{
+        return when(node){
+            is DTLeaf -> {
+                val disjAssgn = groupedTestsToDisjAssignment(groupedBranchLabel)
+                DTLeaf(Pair(disjAssgn, node.value))
+            }
+            is DTDecision -> {
+                val rv = node.rvTest.first
+                val newPassList = (groupedBranchLabel[rv] ?: emptyList()) + Pair(node.rvTest, true)
+                val newFailList = (groupedBranchLabel[rv] ?: emptyList()) + Pair(node.rvTest, false)
+
+                DTDecision(node.rvTest,
+                    withBranchRec(node.passBranch, groupedBranchLabel + Pair(rv, newPassList)),
+                    withBranchRec(node.failBranch, groupedBranchLabel + Pair(rv, newFailList))
+                )
+            }
+        }
+    }
+    return withBranchRec(dt, emptyMap())
+}
+
+fun groupedTestsToDisjAssignment(groupedTests : Map<RandomVariable, List<Pair<RVTest, Boolean>>>) : RVAssignmentDisj =
+    groupedTests.mapValues { (rv, rvTests) ->
+        val passedTest : Pair<RVTest, Boolean>? = rvTests.find { (_, pass) -> pass }
+        if(passedTest != null)
+            listOf(passedTest.first.second)
+        else{
+            val failedTestVals = rvTests.map { it.first.second }
+            rv.domain.indices - failedTestVals
+        }
+    }
+
+fun probability(branchAssgnDisj: RVAssignmentDisj, factorMap : NaiveFactors) : Double{
+    val prob = branchAssgnDisj
+        .map { (rv, assgnVals) -> if(factorMap[rv] != null) assgnVals.sumByDouble { factorMap[rv]!!.values[it] } else 1.0 }
+        .productByDouble { it }
+    if(prob > 0 && branchAssgnDisj.keys.size > factorMap.keys.size){
+        throw IllegalArgumentException("PLeaf should have information on this value node!")
+    }
+    return prob
 }
 
 fun <T> matchLeaf(dTree : DecisionTree<T>, context: RVAssignment) : DTLeaf<T> =
     when(dTree){
         is DTLeaf -> dTree
         is DTDecision -> {
-            if(dTree.rv !in context){
-                throw IllegalArgumentException("Tree trying to match against RV not present in context: ${dTree.rv}")
+            if(dTree.rvTest.first !in context){
+                throw IllegalArgumentException("Tree trying to match against RV not present in context: ${dTree.rvTest}")
             }
-            matchLeaf(dTree.branches[context[dTree.rv]!!], context)
+            if(context[dTree.rvTest.first]!! == dTree.rvTest.second){
+                matchLeaf(dTree.passBranch, context)
+            }
+            else{
+                matchLeaf(dTree.failBranch, context)
+            }
         }
     }
 
-/*
-fun <T> matchAllLeaves(dTree : DecisionTree<T>, partialContext : RVAssignment) : List<DTLeaf<T>> =
-    when(dTree){
-        is DTLeaf -> listOf(dTree)
-        is DTDecision -> if(partialContext.containsKey(dTree.rv)){
-            matchAllLeaves(dTree.branches[partialContext[dTree.rv]!!], partialContext)
-        }
-        else{
-            dTree.branches.flatMap { matchAllLeaves(it, partialContext) }
-        }
-    }
-*/
 
 fun unifStartIDTransJoint(vocab : Collection<RandomVariable>, noise : Double = 0.0) =
     vocab.associate { Pair(it, unifStartIDTransJoint(it, noise)) }
 
-fun unifStartIDTransJoint(rv : RandomVariable, noise : Double = 0.0) : DTDecision<Factor> =
-    DTDecision(rv, rv.domain.indices.map { prevValue ->
-        val condFac = detFactor(rv, prevValue, noise)
-        val jointFac =  Factor(condFac.scope, condFac.values.map { it / rv.domainSize })
-        DTLeaf(jointFac)
-    })
+fun unifStartIDTransJoint(rv : RandomVariable, noise : Double = 0.0) : DecisionTree<Factor> {
+    fun unifStartRec(remainingDomain : List<Int>) : DecisionTree<Factor> {
+        val condFac = detFactor(rv, remainingDomain[0], noise)
+        val jointFac = Factor(condFac.scope, condFac.values.map { it / rv.domainSize })
+        val detLeaf = DTLeaf(jointFac)
 
-fun identityTransition(rv : RandomVariable, noise : Double = 0.0) : DTDecision<Factor> =
-    DTDecision(rv, rv.domain.indices.map { prevValue ->  DTLeaf(detFactor(rv, prevValue, noise))})
+        return when(remainingDomain.size){
+            1 -> detLeaf
+            else -> DTDecision(Pair(rv, remainingDomain[0]), detLeaf, unifStartRec(remainingDomain.drop(1)))
+        }
+    }
+
+    return unifStartRec(rv.domain.indices.toList())
+}
+
+fun identityTransition(rv : RandomVariable, noise : Double = 0.0) : DecisionTree<Factor> {
+    fun idTransRec(remainingDomain : List<Int>) : DecisionTree<Factor> =
+        when(remainingDomain.size){
+            1 -> DTLeaf(detFactor(rv, remainingDomain[0], noise))
+            else -> DTDecision(Pair(rv, remainingDomain[0]),
+                DTLeaf(detFactor(rv, remainingDomain[0], noise)),
+                idTransRec(remainingDomain.drop(1)))
+        }
+
+    return idTransRec(rv.domain.indices.toList())
+}
 
 fun detFactor(rv : RandomVariable, value : Int, noise: Double = 0.0) : Factor {
     if(noise < 0 || noise > 1){
@@ -336,140 +475,240 @@ fun detFactor(rv : RandomVariable, value : Int, noise: Double = 0.0) : Factor {
     return Factor(listOf(rv), rv.domain.indices.map { if(it == value) (1 - noise) + (noise * (1.0 / rv.domainSize))  else noise * (1.0 / rv.domainSize)})
 }
 
-fun pRegress(valTree : DecisionTree<Double>, dbn : DynamicBayesNet) : DecisionTree<NaiveFactors>{
-    // A single leaf node value means you will always arrive at this value regardless of assignment
-    if(valTree is DTLeaf<Double>)
-        return DTLeaf(emptyMap())
-    val rootDecision = valTree as DTDecision<Double>
-    val rootVar = rootDecision.rv
-    val dbnCPDTree = dbn[rootVar]!!
-
-    // Step 3: For values of the root variable that occur with some positive probability
-    val subTrees = rootVar.domain.indices.map{ rootDecision.branches[it]}
-    val subPTrees = subTrees.map { pRegress(it, dbn) }
-
-    // Step 4: Loop over every leaf in cpd tree for root variable
-    val initialPTree = fMap(dbnCPDTree, {mapOf(it.scope.first() to it)})
-    return leavesWithHistory(initialPTree)
-        .fold(initialPTree, { currentTree, (_, leafCPD) ->
-            val relevantSubPTrees = subPTrees.filterIndexed { i, _ -> leafCPD.value[rootVar]!!.values[i] > 0.0}
-            val mergedSubPTrees = merge(relevantSubPTrees, {map1, map2 -> map1 + map2}, ::doubleEquality)
-            append(currentTree, leafCPD, mergedSubPTrees, {map1, map2 -> map1 + map2}, ::doubleEquality)
-        })
+/*
+fun pRegressAlternative(valTree : DecisionTree<Double>, dbn : DynamicBayesNet) : DecisionTree<NaiveFactors> {
+    val relevantVars = vocabInDT(valTree).toSet()
+    val relevantProbTrees = dbn.filterKeys { it in relevantVars }
+    val toMerge = relevantProbTrees.map { (rv, cpt) -> fMap(cpt, { mapOf(rv to it)})}
+    val pTree = merge(toMerge, { map1, map2 -> map1 + map2}, ::doubleEquality)
+    return pTree
 }
+*/
 
-fun <T> simplify(dt : DecisionTree<T>, equalityTest : (T, T) -> Boolean, branchHistory : RVAssignment = emptyMap()) : DecisionTree<T>{
-    when(dt){
-        is DTLeaf -> return dt
+fun <T> pRegress(valTree : DecisionTree<T>, dbn: DynamicBayesNet) : DecisionTree<NaiveFactors>{
+    when(valTree){
+        is DTLeaf -> return DTLeaf(emptyMap())
         is DTDecision -> {
-            if (dt.rv in branchHistory.keys){
-                return simplify(dt.branches[branchHistory[dt.rv]!!], equalityTest, branchHistory)
-            }
-            else{
-                val simplifyFirstPass = DTDecision(dt.rv, dt.branches.mapIndexed{i, node -> simplify(node, equalityTest, branchHistory + Pair(dt.rv, i))})
-                val headBranch = simplifyFirstPass.branches.first()
-                val tailBranches = simplifyFirstPass.branches.subList(1, simplifyFirstPass.branches.size)
+            val rootVar = valTree.rvTest.first
+            val dbnCPDTree = fMap(dbn[rootVar]!!, { mapOf(it.scope.first() to it) })
 
-                if(tailBranches.all { checkEquality(headBranch, it, equalityTest) }){
-                    return simplifyFirstPass.branches.first()
-                }
-                return simplifyFirstPass
+            if(equivStructure(valTree.passBranch, valTree.failBranch)){
+                val toAppend = pRegress(valTree.passBranch, dbn)
+                return append(dbnCPDTree, toAppend, {map1, map2 -> map1 + map2}, ::doubleEquality)
             }
+
+            // Step 3: For values of the root variable that occur with some positive probability
+            val passPTree = pRegress(valTree.passBranch, dbn)
+            val failPTree = pRegress(valTree.failBranch, dbn)
+            val mergedPTree = merge(listOf(passPTree, failPTree), { map1, map2 -> map1 + map2}, ::doubleEquality)
+
+            return leavesWithHistory(dbnCPDTree)
+                .fold(dbnCPDTree, { currentTree, (branchLabel,leaf) ->
+                    // Given the current leaf probabilities, which branches are even possible?
+                    val leafCPD = leaf.value[rootVar]!!
+
+                    val passRelevant = leafCPD.values[valTree.rvTest.second] > 0.0
+                    val failRelevant = leafCPD.values.withIndex().any { (i, p) -> i != valTree.rvTest.second && p > 0.0 }
+
+                    when{
+                        passRelevant && failRelevant -> appendToLeaf(currentTree, branchLabel, mergedPTree, {map1, map2 -> map1 + map2}, ::doubleEquality)
+                        passRelevant -> appendToLeaf(currentTree, branchLabel, passPTree, {map1, map2 -> map1 + map2}, ::doubleEquality)
+                        failRelevant -> appendToLeaf(currentTree, branchLabel, failPTree, {map1, map2 -> map1 + map2}, ::doubleEquality)
+                        else -> currentTree
+                    }
+                })
+
         }
     }
 }
+
+fun <T> equivStructure(dt1 : DecisionTree<T>, dt2 : DecisionTree<T>) : Boolean {
+    if(dt1 is DTLeaf && dt2 is DTLeaf){
+        return true
+    }
+
+    if(dt1 is DTDecision && dt2 is DTDecision && dt1.rvTest == dt2.rvTest){
+        return equivStructure(dt1.passBranch, dt2.passBranch) && equivStructure(dt1.failBranch, dt2.failBranch)
+    }
+
+    return false
+}
+
+fun <T> simplify(dt : DecisionTree<T>, equalityTest : (T, T) -> Boolean, branchHistory : Map<RVTest, Boolean> = emptyMap()) : DecisionTree<T>{
+    when(dt){
+        is DTLeaf -> return dt
+        is DTDecision -> {
+            if (dt.rvTest in branchHistory){
+                val keepBranch = if(branchHistory[dt.rvTest]!!) dt.passBranch else dt.failBranch
+                return simplify(keepBranch, equalityTest, branchHistory)
+            }
+
+            // If a previous test with this RV passed, then this different one will definitely fail
+            val dtRV = dt.rvTest.first
+            val prevRvPass = branchHistory.entries.find { it.key.first == dtRV && it.value }
+            if(prevRvPass != null){
+                return simplify(dt.failBranch, equalityTest, branchHistory)
+            }
+
+            // If you've tested failure on every other value of rv, you can (probably) safely infer this one passes
+            val testedRVDomain = branchHistory.keys.filter { it.first == dtRV }
+
+            if(testedRVDomain.size == dt.rvTest.first.domainSize - 1){
+                return simplify(dt.passBranch, equalityTest, branchHistory)
+            }
+
+            val simplifiedPass = simplify(dt.passBranch, equalityTest, branchHistory + Pair(dt.rvTest, true))
+            val simplifiedFail = simplify(dt.failBranch, equalityTest, branchHistory + Pair(dt.rvTest, false))
+
+            if(checkEquality(simplifiedPass, simplifiedFail, equalityTest)){
+                return simplifiedPass
+            }
+
+            return DTDecision(dt.rvTest, simplifiedPass, simplifiedFail)
+        }
+    }
+}
+
+fun <T> oneStepSimplify(dt : DecisionTree<T>, equalityTest : (T, T) -> Boolean) : DecisionTree<T> =
+    when(dt){
+        is DTLeaf -> dt
+        is DTDecision ->
+            if(checkEquality(dt.passBranch, dt.failBranch, equalityTest)) dt.passBranch
+            else dt
+    }
+
+fun toRanged(dt : DecisionTree<Double>) : DecisionTree<Range> =
+    fMap(dt, { Range(it, it)})
+
+fun fromRanged(dt : DecisionTree<Range>) : DecisionTree<Double> =
+    fMap(dt, {(it.upper + it.lower) / 2.0})
 
 @JvmName("Prune Single")
 fun prune(dt : DecisionTree<Double>, threshold : Double) =
-    prune(fMap(dt, { Pair(it, it) }), threshold)
+    prune(fMap(dt, { Range(it, it) }), threshold)
 
-fun prune(dt : DecisionTree<Pair<Double, Double>>, threshold : Double) : DecisionTree<Double> {
-    fun pruneRanged(rt : DecisionTree<Pair<Double, Double>>) : DecisionTree<Pair<Double, Double>> {
-        when(rt){
-            is DTLeaf -> return rt
-            is DTDecision -> {
-                val prunedBranches = rt.branches.map(::pruneRanged)
-                if (!prunedBranches.all { it is DTLeaf }){
-                    return DTDecision(rt.rv, prunedBranches)
-                }
-                val childRanges = prunedBranches.map { (it as DTLeaf<Pair<Double, Double>>).value }
-                val maxVal : Double = childRanges.map { it.second }.max()!!
-                val minVal : Double = childRanges.map { it.first }.min()!!
-                if(maxVal - minVal < threshold){
-                    return DTLeaf(Pair(minVal, maxVal))
-                }
-                return DTDecision(rt.rv, prunedBranches)
-            }
-        }
-    }
-
-    return fMap(pruneRanged(dt), {(min, max) -> (min + max) / 2.0})
-}
-
-@JvmName("ReOrderDTSingle")
-fun reOrderDT(dt : DecisionTree<Double>) = reOrderDT(fMap(dt, { Pair(it, it)}))
-
-fun reOrderDT(dt : DecisionTree<Pair<Double, Double>>) : DecisionTree<Pair<Double,Double>> {
+fun prune(dt : DecisionTree<Range>, threshold : Double) : DecisionTree<Range> =
     when(dt){
-        is DTLeaf -> return dt
+        is DTLeaf -> dt
         is DTDecision -> {
-            val dtVocab = getVocab(dt)
-            val varRanges = rangesForVarSplits(dtVocab, dt)
-            val varSpans = varRanges.mapValues { (_, ranges) -> ranges.map { it.second - it.first } }
-            val varEntropies = varSpans.mapValues { (_, spans) -> spanEntropy(spans) }
-            val (bestVar, _) = varEntropies.maxBy { it.value }!!
+            val prunedPass = prune(dt.passBranch, threshold)
+            val prunedFail = prune(dt.failBranch, threshold)
 
-            val transposedTree = transposeTree(dt, bestVar)
-            return when(transposedTree){
-                is DTLeaf -> transposedTree
-                is DTDecision -> transposedTree.copy(branches = transposedTree.branches.map(::reOrderDT))
+            if (prunedPass is DTLeaf && prunedFail is DTLeaf){
+                val passRange = prunedPass.value
+                val failRange = prunedFail.value
+                val maxVal : Double = maxOf(passRange.upper, failRange.upper)
+                val minVal : Double = minOf(passRange.lower, failRange.lower)
+                if(maxVal - minVal < threshold){
+                    DTLeaf(Range(minVal, maxVal))
+                }
+                else {
+                    DTDecision(dt.rvTest, prunedPass, prunedFail)
+                }
+            }
+            else {
+                DTDecision(dt.rvTest, prunedPass, prunedFail)
             }
         }
     }
-}
 
-fun transposeTree(dt : DTDecision<Pair<Double,Double>>, replacementRV : RandomVariable) : DecisionTree<Pair<Double,Double>>{
-    val oldRV = dt.rv
-    if(oldRV == replacementRV) return dt
 
-    val transposedBranches = dt.branches.map { if(it is DTDecision) transposeTree(it, replacementRV) else it }
+fun transposeTree(dt : DTDecision<Range>, replacementTest : RVTest) : DecisionTree<Range>{
+    val oldTest = dt.rvTest
+    if(oldTest == replacementTest) return dt
 
-    if(transposedBranches.size != 2){
-        throw NotImplementedError("Can't handle non-binary trees yet")
-    }
+    val passBranch = if(dt.passBranch is DTDecision) transposeTree(dt.passBranch, replacementTest) else dt.passBranch
+    val failBranch = if(dt.failBranch is DTDecision) transposeTree(dt.failBranch, replacementTest) else dt.failBranch
 
-    val firstBranch = transposedBranches[0]
-    val secondBranch = transposedBranches[1]
-
-    if(firstBranch is DTDecision && secondBranch is DTDecision){
-        return dt.copy(rv = replacementRV,
-            branches =
-            listOf(
-                DTDecision(oldRV, listOf(firstBranch.branches[0], secondBranch.branches[0])),
-                DTDecision(oldRV, listOf(firstBranch.branches[1], secondBranch.branches[1]))
-            )
+    if(passBranch is DTDecision && failBranch is DTDecision){
+        return dt.copy(rvTest = replacementTest,
+                passBranch = DTDecision(oldTest, passBranch.passBranch, failBranch.passBranch),
+                failBranch = DTDecision(oldTest, passBranch.failBranch, failBranch.failBranch)
         )
     }
-    if(firstBranch is DTLeaf && secondBranch is DTLeaf) {
-        val (passMin, passMax) = firstBranch.value
-        val (failMin, failMax) = secondBranch.value
-        return DTLeaf(Pair(minOf(passMin, failMin), maxOf(passMax, failMax)))
+    if(passBranch is DTLeaf && failBranch is DTLeaf) {
+        return DTDecision(replacementTest,
+            DTDecision(oldTest, passBranch, failBranch),
+            DTDecision(oldTest, passBranch, failBranch)
+        )
     }
 
-    if(secondBranch is DTDecision && firstBranch is DTLeaf){
-        return DTDecision(replacementRV, listOf(
-            DTDecision(oldRV, listOf(firstBranch, secondBranch.branches[0])),
-            DTDecision(oldRV, listOf(firstBranch, secondBranch.branches[1]))
-        ))
+    if(failBranch is DTDecision && passBranch is DTLeaf){
+        return DTDecision(replacementTest,
+            DTDecision(oldTest, passBranch, failBranch.passBranch),
+            DTDecision(oldTest, passBranch, failBranch.failBranch)
+        )
     }
-    if(firstBranch is DTDecision && secondBranch is DTLeaf){
-        return DTDecision(replacementRV, listOf(
-            DTDecision(oldRV, listOf(firstBranch.branches[0], secondBranch)),
-            DTDecision(oldRV, listOf(firstBranch.branches[1], secondBranch))
-        ))
+    if(passBranch is DTDecision && failBranch is DTLeaf){
+        return DTDecision(replacementTest,
+            DTDecision(oldTest, passBranch.passBranch, failBranch),
+            DTDecision(oldTest, passBranch.failBranch, failBranch)
+        )
     }
 
     throw IllegalStateException("All type cases should be covered, how did you get here?")
+}
+
+/*
+@JvmName("transposeAction")
+fun transposeTree(dt : DTDecision<Action>, replacementTest : RVTest) : DecisionTree<Action>{
+    val oldTest = dt.rvTest
+    if(oldTest == replacementTest) return dt
+
+    val passBranch = if(dt.passBranch is DTDecision) transposeTree(dt.passBranch, replacementTest) else dt.passBranch
+    val failBranch = if(dt.failBranch is DTDecision) transposeTree(dt.failBranch, replacementTest) else dt.failBranch
+
+    if(passBranch is DTDecision && failBranch is DTDecision){
+        return dt.copy(rvTest = replacementTest,
+            passBranch = DTDecision(oldTest, passBranch.passBranch, failBranch.passBranch),
+            failBranch = DTDecision(oldTest, passBranch.failBranch, failBranch.failBranch)
+        )
+    }
+    WRONG!!!
+    if(passBranch is DTLeaf && failBranch is DTLeaf) {
+        return DTDecision(replacementTest, passBranch, failBranch)
+    }
+
+    if(failBranch is DTDecision && passBranch is DTLeaf){
+        return DTDecision(replacementTest,
+            DTDecision(oldTest, passBranch, failBranch.passBranch),
+            DTDecision(oldTest, passBranch, failBranch.failBranch)
+        )
+    }
+    if(passBranch is DTDecision && failBranch is DTLeaf){
+        return DTDecision(replacementTest,
+            DTDecision(oldTest, passBranch.passBranch, failBranch),
+            DTDecision(oldTest, passBranch.failBranch, failBranch)
+        )
+    }
+
+    throw IllegalStateException("All type cases should be covered, how did you get here?")
+}
+*/
+
+@JvmName("ReOrderDTSingle")
+fun reOrderDT(dt : DecisionTree<Double>) = reOrderDT(fMap(dt, { Range(it, it)}))
+
+fun reOrderDT(dt : DecisionTree<Range>) : DecisionTree<Range> {
+    fun reOrderRec(node : DecisionTree<Range>) : DecisionTree<Range> {
+        when(node){
+            is DTLeaf -> return node
+            is DTDecision -> {
+                val dtTests = getAllTests(node)
+                val varRanges = rangesForVarSplits(dtTests, node)
+                val varSpans = varRanges.mapValues { (_, ranges) -> ranges.map { it.upper - it.lower } }
+                val varEntropies = varSpans.mapValues { (_, spans) -> spanEntropy(spans) }
+                val (bestTest, _) = varEntropies.maxBy { it.value }!!
+
+                val transposedTree = transposeTree(node, bestTest)
+                return when(transposedTree){
+                    is DTLeaf -> transposedTree
+                    is DTDecision -> transposedTree.copy(passBranch = reOrderRec(transposedTree.passBranch), failBranch = reOrderRec(transposedTree.failBranch))
+                }
+            }
+        }
+    }
+    return simplify(reOrderRec(dt), ::doubleEquality)
 }
 
 fun spanEntropy(vals : Collection<Double>) : Double {
@@ -479,40 +718,41 @@ fun spanEntropy(vals : Collection<Double>) : Double {
     return vals.map { -Math.log(it) }.average()
 }
 
-fun <T> getVocab(dt : DecisionTree<T>) : Set<RandomVariable>{
+fun intEntropy(vals : Collection<Int>) = spanEntropy(vals.map(Int::toDouble))
+
+fun <T> getAllTests(dt : DecisionTree<T>) : Set<RVTest>{
     when(dt){
         is DTLeaf -> return emptySet()
-        is DTDecision -> return dt.branches.flatMap(::getVocab).toSet() + dt.rv
+        is DTDecision -> return getAllTests(dt.passBranch) + getAllTests(dt.failBranch) + dt.rvTest
     }
 }
 
-fun rangesForVarSplits(vocab : Set<RandomVariable>, dt : DecisionTree<Pair<Double,Double>>) : Map<RandomVariable, List<Pair<Double, Double>>>{
-    val rangeSplits = vocab
-        .associate { rv -> Pair(rv, rv.domain
-            .map { Pair(Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY) }
+fun rangesForVarSplits(tests : Set<RVTest>, dt : DecisionTree<Range>) : Map<RVTest, List<Range>>{
+    val rangeSplits = tests
+        .associate { rvTest -> Pair(rvTest, listOf(false, true)
+            .map { Range(Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY) }
             .toMutableList())
         }
         .toMutableMap()
 
-    fun splitsForVarsRec(node : DecisionTree<Pair<Double,Double>>, branchLabel : RVAssignment){
+    fun splitsForVarsRec(node : DecisionTree<Range>, branchLabel : Map<RVTest, Boolean>){
         when(node){
             is DTLeaf -> {
-                for(rv in vocab){
-                    val rvSplit = rangeSplits[rv]!!
-                    if(branchLabel.containsKey(rv)){
-                        val rvLabel = branchLabel[rv]!!
-                        val relevantRange = rvSplit[rvLabel]
-                        rvSplit[rvLabel] = Pair(Math.min(relevantRange.first, node.value.first), Math.max(relevantRange.second, node.value.second))
+                for(rvTest in tests){
+                    val rvSplit = rangeSplits[rvTest]!!
+                    if(branchLabel.containsKey(rvTest)){
+                        val testLabel = if(branchLabel[rvTest]!!) 1 else 0
+                        val relevantRange = rvSplit[testLabel]
+                        rvSplit[testLabel] = Range(Math.min(relevantRange.lower, node.value.lower), Math.max(relevantRange.upper, node.value.upper))
                     }
                     else{
-                        rangeSplits[rv] = rvSplit.map { Pair(Math.min(it.first, node.value.first), Math.max(it.second, node.value.second)) }.toMutableList()
+                        rangeSplits[rvTest] = rvSplit.map { Range(Math.min(it.lower, node.value.lower), Math.max(it.upper, node.value.upper)) }.toMutableList()
                     }
                 }
             }
             is DTDecision -> {
-                for((i, branch) in node.branches.withIndex()){
-                    splitsForVarsRec(branch, branchLabel + Pair(node.rv, i))
-                }
+                splitsForVarsRec(node.passBranch, branchLabel + Pair(node.rvTest, true))
+                splitsForVarsRec(node.failBranch, branchLabel + Pair(node.rvTest, false))
             }
         }
     }
@@ -521,37 +761,111 @@ fun rangesForVarSplits(vocab : Set<RandomVariable>, dt : DecisionTree<Pair<Doubl
     return rangeSplits
 }
 
+fun <T> parMerge(dts: Collection<DecisionTree<T>>, commutativeMerge : (T, T) -> T, equalityTest : (T, T) -> Boolean) : DecisionTree<T> =
+    dts.parallelStream().reduce{acc, dt -> append(acc, dt, commutativeMerge, equalityTest)}.get()
+
 fun <T> merge(dts : Collection<DecisionTree<T>>, mergeFunc: (T, T) -> T, equalityTest: (T, T) -> Boolean) =
     dts.reduce{acc, dt -> append(acc, dt, mergeFunc, equalityTest)}
 
-fun <T> append(dt1 : DecisionTree<T>, dt2 : DecisionTree<T>, mergeFunc: (T, T) -> T, equalityTest: (T, T) -> Boolean) : DecisionTree<T>{
-    val complicatedDT = when(dt1){
-        is DTLeaf<T> -> fMap(dt2, {mergeFunc(dt1.value, it)})
-        is DTDecision<T> -> DTDecision(dt1.rv, dt1.branches.map { append(it, dt2, mergeFunc, equalityTest)})
+fun <T> orderedMerge(testOrder: List<RVTest>, orderedDTs : List<DecisionTree<T>>, mergeFunc: (T, T) -> T)  : DecisionTree<T>{
+    // Reminder : Do we need to simplify?
+    if (orderedDTs.all { it is DTLeaf }){
+        return (orderedDTs as List<DTLeaf<T>>).reduce { acc : DTLeaf<T>, dtLeaf : DTLeaf<T> -> DTLeaf(mergeFunc(dtLeaf.value, acc.value)) }
     }
-    return simplify(complicatedDT, equalityTest)
+    if(testOrder.isEmpty()){
+        throw IllegalStateException("Ordering is used up, but there are still untraversed branches!")
+    }
+
+    val firstRVTest = testOrder.find { test -> orderedDTs.any { it is DTDecision && it.rvTest ==  test} }!!
+    val passDTs = orderedDTs.map { dt -> if(dt is DTDecision && dt.rvTest == firstRVTest) dt.passBranch else dt }
+    val failDTs = orderedDTs.map { dt -> if(dt is DTDecision && dt.rvTest == firstRVTest) dt.failBranch else dt }
+
+    val remainingOrdering = testOrder.dropWhile { it != firstRVTest }
+    return DTDecision(firstRVTest, orderedMerge(remainingOrdering, passDTs, mergeFunc), orderedMerge(remainingOrdering, failDTs, mergeFunc))
 }
 
-fun <T> append(dt : DecisionTree<T>, oldLeaf : DTLeaf<T>, newNode: DecisionTree<T>, mergeFunc: (T, T) -> T, equalityTest: (T, T) -> Boolean) : DecisionTree<T> {
-    val complicatedDT = when(dt){
-        oldLeaf -> fMap(newNode, {mergeFunc(oldLeaf.value, it)})
-        is DTLeaf<T> -> dt
-        is DTDecision<T> -> DTDecision(dt.rv, dt.branches.map { append(it, oldLeaf, newNode, mergeFunc, equalityTest) })
+fun setOrder(dt : DecisionTree<Range>, order : List<RVTest>) : DecisionTree<Range> {
+    fun setOrderRec(node : DecisionTree<Range>, remainingOrder : List<RVTest>) : DecisionTree<Range>{
+        when(node){
+            is DTLeaf -> return node
+            is DTDecision -> {
+                val dtTests = getAllTests(node)
+                val relevantOrder = remainingOrder.filter { it in dtTests }
+                if(relevantOrder.isEmpty()){
+                    throw IllegalStateException("There are tests in this DT which are not mentioned in the ordering")
+                }
+                val transposedDT = transposeTree(node, relevantOrder.first())
+                return when(transposedDT){
+                    is DTLeaf -> transposedDT
+                    is DTDecision -> transposedDT.copy(passBranch = setOrderRec(transposedDT.passBranch, relevantOrder.drop(1)), failBranch = setOrderRec(transposedDT.failBranch, relevantOrder.drop(1)))
+                }
+            }
+        }
     }
-    return simplify(complicatedDT, equalityTest)
+
+    return simplify(setOrderRec(dt, order), ::doubleEquality)
+}
+
+fun <T, S> append(dt1 : DecisionTree<T>, dt2 : DecisionTree<T>, mergeFunc: (T, T) -> S, equalityTest: (S, S) -> Boolean) : DecisionTree<S>{
+    fun appendRec(dt: DecisionTree<T>, branchLabel: Map<RVTest, Boolean>) : DecisionTree<S> {
+        return when(dt){
+            is DTLeaf<T> -> {
+                val extendedLeaf = fMap(dt2, {mergeFunc(dt.value, it)})
+                simplify(extendedLeaf, equalityTest, branchLabel)
+            }
+            is DTDecision<T> -> {
+                /*
+                val (newPass, newFail) = listOf(Pair(dt.passBranch, true), Pair(dt.failBranch, false))
+                    .parallelStream()
+                    .map { (b, passVal) -> appendRec(b, branchLabel + Pair(dt.rvTest, passVal)) }
+                    .toList()
+                */
+                val extendedNode = DTDecision(dt.rvTest, appendRec(dt.passBranch, branchLabel + Pair(dt.rvTest, true)), appendRec(dt.failBranch, branchLabel + Pair(dt.rvTest, false)))
+                oneStepSimplify(extendedNode, equalityTest)
+            }
+        }
+    }
+
+    return appendRec(dt1, emptyMap())
+}
+
+fun <T> appendToLeaf(dt : DecisionTree<T>, branchLabel: Map<RVTest, Boolean>, newNode: DecisionTree<T>, mergeFunc: (T, T) -> T, equalityTest: (T, T) -> Boolean) : DecisionTree<T> {
+    fun appendRec(node : DecisionTree<T>) : DecisionTree<T> {
+        return when(node){
+            is DTLeaf<T> -> {
+                val extendedLeaf = fMap(newNode, {mergeFunc(node.value, it)})
+                simplify(extendedLeaf, equalityTest, branchLabel)
+            }
+            is DTDecision<T> -> {
+                val extendedNode = if(branchLabel[node.rvTest]!!)
+                    DTDecision(node.rvTest, appendRec(node.passBranch), node.failBranch)
+                else
+                    DTDecision(node.rvTest, node.passBranch, appendRec(node.failBranch))
+                oneStepSimplify(extendedNode, equalityTest)
+            }
+        }
+    }
+
+    return appendRec(dt)
 }
 
 fun <T, S> fMap(dt : DecisionTree<T>, func : (T) -> S) : DecisionTree<S> =
     when(dt){
         is DTLeaf<T> -> DTLeaf(func(dt.value))
-        is DTDecision<T> -> DTDecision(dt.rv, dt.branches.map{fMap(it, func)})
+        is DTDecision<T> -> {
+            val (newPass, newFail) = listOf(dt.passBranch, dt.failBranch)
+                .parallelStream()
+                .map { fMap(it, func) }
+                .toList()
+            DTDecision(dt.rvTest, newPass, newFail)
+        }
     }
 
 fun <T> checkEquality(dt1 : DecisionTree<T>, dt2 : DecisionTree<T>, eqFunc : (T, T) -> Boolean) : Boolean =
     when{
         dt1 is DTLeaf && dt2 is DTLeaf -> eqFunc(dt1.value, dt2.value)
-        dt1 is DTDecision && dt2 is DTDecision && dt1.rv == dt2.rv && dt1.branches.size == dt2.branches.size -> {
-            dt1.branches.zip(dt2.branches).all { (b1, b2) -> checkEquality(b1, b2, eqFunc) }
+        dt1 is DTDecision && dt2 is DTDecision && dt1.rvTest == dt2.rvTest -> {
+            checkEquality(dt1.passBranch, dt2.passBranch, eqFunc) && checkEquality(dt1.failBranch, dt2.failBranch, eqFunc)
         }
         else -> false
     }
@@ -573,12 +887,8 @@ fun doubleEquality(a: Double, b: Double) : Boolean{
     return diff / Math.min(absA + absB, Double.MAX_VALUE) < epsilon
 }
 
-fun <T> numLeaves(dt : DecisionTree<T>) : Int{
-    when(dt){
-        is DTLeaf -> return 1
-        is DTDecision -> return dt.branches.sumBy(::numLeaves)
-    }
-}
+fun doubleEquality(r1 : Range, r2: Range) =
+    doubleEquality(r1.lower, r2.lower) && doubleEquality(r1.upper, r2.upper)
 
 fun doubleEquality(f1 : Factor, f2: Factor) =
     f1.scope == f2.scope &&
@@ -588,3 +898,17 @@ fun doubleEquality(f1 : Factor, f2: Factor) =
 
 fun doubleEquality(f1s : NaiveFactors, f2s : NaiveFactors) =
     f1s.keys == f2s.keys && f1s.keys.all { k -> doubleEquality(f1s[k]!!, f2s[k]!!) }
+
+fun <T> numLeaves(dt : DecisionTree<T>) : Int{
+    when(dt){
+        is DTLeaf -> return 1
+        is DTDecision -> return numLeaves(dt.passBranch) + numLeaves(dt.failBranch)
+    }
+}
+
+fun <T> numNodes(dt : DecisionTree<T>) : Int {
+    when(dt){
+        is DTLeaf -> return 1
+        is DTDecision -> return 1 + numLeaves(dt.passBranch) + numLeaves(dt.failBranch)
+    }
+}

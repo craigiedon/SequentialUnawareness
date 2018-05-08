@@ -12,12 +12,12 @@ data class ITIUpdateConfig<in T, C>(
 )
 
 sealed class ITINode<T, C>{
-    abstract val branchLabel : RVAssignment
+    abstract val branchLabel : Map<RVTest, Boolean>
     abstract val testCandidates : Map<RVTest, TestStats<C>>
     abstract val stale : Boolean
 }
 data class ITILeaf<T, C>(
-    override val branchLabel : RVAssignment,
+    override val branchLabel : Map<RVTest, Boolean>,
     override val testCandidates: Map<RVTest, TestStats<C>>,
     val examples : List<T>,
     val counts : MutableMap<C, Int>,
@@ -25,7 +25,7 @@ data class ITILeaf<T, C>(
 ) : ITINode<T, C>()
 
 data class ITIDecision<T, C>(
-    override val branchLabel : RVAssignment,
+    override val branchLabel : Map<RVTest, Boolean>,
     override val testCandidates: Map<RVTest, TestStats<C>>,
     val currentTest: RVTest,
     val passBranch : ITINode<T,C>,
@@ -214,7 +214,7 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
             is ITIDecision -> {
                 val shouldRevise = bestTest != dt.currentTest &&
                     bestScore - testScores[dt.currentTest]!! > config.splitThresh &&
-                    dt.branchLabel[bestTest.first] != bestTest.second
+                    !dt.branchLabel.containsKey(bestTest)
 
                 val revisedNode = if(shouldRevise)
                     transposeTree(dt, bestTest, vocab, config.testChecker, config.exampleToClass)
@@ -231,17 +231,17 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
             is ITILeaf -> {
                 val currentScore = config.scoreFunc(listOf(dt.counts))
                 if(bestScore - currentScore > config.splitThresh) {
-                    if(dt.branchLabel[bestTest.first] == bestTest.second){
+                    if(dt.branchLabel.containsKey(bestTest)){
                         println("Why are we putting this test in again?")
                     }
                     val (passTrials, failTrials) = dt.examples.partition { config.testChecker(bestTest, it) }
-                    val passLeaf = ITILeaf(dt.branchLabel + bestTest,
+                    val passLeaf = ITILeaf(dt.branchLabel + Pair(bestTest, true),
                         createStats(vocab, passTrials, config.testChecker, config.exampleToClass),
                         passTrials,
                         dt.testCandidates[bestTest]!!.passTrialCounts.toMutableMap(),
                         true
                     )
-                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest.first, 1 - bestTest.second),
+                    val failLeaf = ITILeaf(dt.branchLabel + Pair(bestTest, false),
                         createStats(vocab, failTrials, config.testChecker, config.exampleToClass),
                         failTrials,
                         dt.testCandidates[bestTest]!!.failTrialCounts.toMutableMap(),
@@ -293,17 +293,17 @@ fun <T, C> transposeTree(dt : ITIDecision<T,C>,
         val newPassStats = mergeTests(passRootPassReplacement, failRootPassReplacement)
         val newFailStats = mergeTests(passRootFailReplacement, failRootFailReplacement)
 
-        val newPassBranch = ITIDecision(dt.branchLabel + replacementTest, newPassStats, rootTest, passRootPassReplacement, failRootPassReplacement, stale = true)
-        val newFailBranch = ITIDecision(dt.branchLabel + Pair(replacementTest.first, 1 - replacementTest.second), newFailStats, rootTest, passRootFailReplacement, failRootFailReplacement, stale = true)
+        val newPassBranch = ITIDecision(dt.branchLabel + Pair(replacementTest, true), newPassStats, rootTest, passRootPassReplacement, failRootPassReplacement, stale = true)
+        val newFailBranch = ITIDecision(dt.branchLabel + Pair(replacementTest, false), newFailStats, rootTest, passRootFailReplacement, failRootFailReplacement, stale = true)
         return dt.copy(currentTest = replacementTest, passBranch = newPassBranch, failBranch = newFailBranch)
     }
     if( transposedPass is ITIDecision && transposedFail is ITILeaf) {
 
-        return addExamples(removeLabel(transposedPass, rootTest.first), transposedFail.examples, classExtractor, testChecker) as ITIDecision<T, C>
+        return addExamples(removeLabel(transposedPass, rootTest), transposedFail.examples, classExtractor, testChecker) as ITIDecision<T, C>
     }
 
     if(transposedFail is ITIDecision && transposedPass is ITILeaf){
-        return addExamples(removeLabel(transposedFail, rootTest.first), transposedPass.examples, classExtractor, testChecker) as ITIDecision<T, C>
+        return addExamples(removeLabel(transposedFail, rootTest), transposedPass.examples, classExtractor, testChecker) as ITIDecision<T, C>
     }
     if(transposedPass is ITILeaf && transposedFail is ITILeaf){
         val (newPassTrials, newFailTrials) = (transposedPass.examples + transposedFail.examples).partition { testChecker(replacementTest, it) }
@@ -316,8 +316,8 @@ fun <T, C> transposeTree(dt : ITIDecision<T,C>,
 
         return dt.copy(
             currentTest = replacementTest,
-            passBranch = ITILeaf(dt.branchLabel + replacementTest, passLeafTests, newPassTrials, passCounts, true),
-            failBranch = ITILeaf(dt.branchLabel + Pair(replacementTest.first, 1 - replacementTest.second), failLeafTests, newFailTrials, failCounts, true),
+            passBranch = ITILeaf(dt.branchLabel + Pair(replacementTest, true), passLeafTests, newPassTrials, passCounts, true),
+            failBranch = ITILeaf(dt.branchLabel + Pair(replacementTest, false), failLeafTests, newFailTrials, failCounts, true),
             stale = true
         )
     }
@@ -325,7 +325,7 @@ fun <T, C> transposeTree(dt : ITIDecision<T,C>,
     throw IllegalStateException("All type cases should be covered, how did you get here?")
 }
 
-fun <T, C> removeLabel(itiNode: ITINode<T, C>, testVar : RandomVariable) : ITINode<T, C> =
+fun <T, C> removeLabel(itiNode: ITINode<T, C>, testVar : RVTest) : ITINode<T, C> =
     when(itiNode){
         is ITILeaf -> itiNode.copy(branchLabel = itiNode.branchLabel - testVar)
         is ITIDecision -> itiNode.copy(branchLabel = itiNode.branchLabel - testVar, passBranch = removeLabel(itiNode.passBranch, testVar), failBranch = removeLabel(itiNode.failBranch, testVar))

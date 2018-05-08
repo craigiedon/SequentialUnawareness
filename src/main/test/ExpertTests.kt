@@ -3,13 +3,13 @@ import org.junit.Test
 
 class ExpertTests{
 
-    val rewardTree = DTDecision(A, listOf(
-        DTDecision(B, listOf(
+    val rewardTree = DTDecision(Pair(A,0),
+        DTDecision(Pair(B,0),
             DTLeaf(5.0),
             DTLeaf(10.0)
-        )),
+        ),
         DTLeaf(3.0)
-    ))
+    )
 
     val trueMDP = MDP(setOf(A,B,C,D), rewardTree, setOf("A1", "A2"), emptyMap(), 0.99)
 
@@ -61,7 +61,7 @@ class ExpertTests{
 
     @Test
     fun betterActionAdvice_decisionQs_adviceGivenIsBestAction(){
-        val qFuncs = mapOf("A1" to DTDecision(A, listOf(DTLeaf(3.0), DTLeaf(100.0))), "A2" to DTDecision(A, listOf(DTLeaf(5.0), DTLeaf(0.0))), "A3" to DTLeaf(4.0))
+        val qFuncs = mapOf("A1" to DTDecision(Pair(A,0), DTLeaf(3.0), DTLeaf(100.0)), "A2" to DTDecision(Pair(A,0), DTLeaf(5.0), DTLeaf(0.0)), "A3" to DTLeaf(4.0))
         val expert = Expert(10, 0.1, 1, mutableSetOf(), trueMDP, qFuncs)
         val result = betterActionAdvice(mapOf(A to 1, B to 0), expert)
         Assert.assertEquals("A1", result)
@@ -102,7 +102,7 @@ class ExpertTests{
         val expert = Expert(10, 0.1, 1, mutableSetOf(A), trueMDP, emptyMap())
         expert.stateHist[2] = mapOf(A to 0, B to 0)
         expert.stateHist[4] = mapOf(A to 1, B to 0)
-        val result = resolveMisunderstanding(2, 4, expert)
+        resolveMisunderstanding(2, 4, expert)
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -110,7 +110,7 @@ class ExpertTests{
         val expert = Expert(10, 0.1, 1, mutableSetOf(), trueMDP, emptyMap())
         expert.stateHist[2] = mapOf(A to 0, B to 0)
         expert.stateHist[4] = mapOf(A to 0, B to 0)
-        val result = resolveMisunderstanding(2, 4, expert)
+        resolveMisunderstanding(2, 4, expert)
     }
 
     @Test

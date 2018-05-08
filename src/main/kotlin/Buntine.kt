@@ -1,5 +1,7 @@
 import Utils.repeatNum
 import Utils.sumInnerLnProbs
+import com.fasterxml.jackson.annotation.JsonSubTypes
+import com.fasterxml.jackson.annotation.JsonTypeInfo
 import com.google.common.collect.Sets
 import java.util.*
 
@@ -36,16 +38,67 @@ data class DBNInfo(
     val pSetPriors : Map<RandomVariable, LogPrior<PSet>>,
     val lastStructUpdate : Int
 ){
-    val vocab : Set<RandomVariable> get() = reasonableParents.keys
+    val vocab : Set<RandomVariable> get() = dbn.keys
 }
+
+fun rawStructData(dbnInfo : DBNInfo) : Map<String, List<String>> =
+    dbnInfo.bestPInfos
+        .mapKeys { it.key.name }
+        .mapValues { it.value.parentSet.map { it.name } }
 
 data class ParentExtResult(val logPriors : Map<RandomVariable, LogPrior<PSet>>, val reasonableParents : Map<RandomVariable, List<PSet>>)
 
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+@JsonSubTypes(
+    JsonSubTypes.Type(value = DegrisUpdater::class, name = "degris"),
+    JsonSubTypes.Type(value = BuntineUpdater::class, name = "buntine")
+)
+interface DBNUpdater{
+    fun addBeliefVariables(newVars : Set<RandomVariable>, timeOfUpdate: Int, seqTrials: List<SequentialTrial>, expertEv: List<DirEdge>, dbnInfo: DBNInfo) : DBNInfo
+    fun initialDBNInfo(vocab : Set<RandomVariable>, expertEv: List<DirEdge>, timeStep : TimeStamp) : DBNInfo
+    fun trialUpdate(seqTrial : SequentialTrial, trialHistory : List<SequentialTrial>, expertEv : List<DirEdge>, timeOfUpdate: TimeStamp, dbnInfo: DBNInfo) : DBNInfo
+}
 
-class BuntineUpdater(private val aliveThresh: Double, private val pseudoCountSize : Double, private val singleParentProb : Double) {
+class DegrisUpdater(val pseudoCountSize : Double) : DBNUpdater{
+    override fun initialDBNInfo(vocab: Set<RandomVariable>, expertEv: List<DirEdge>, timeStep: TimeStamp): DBNInfo {
+        val priorJointParams = unifStartIDTransJoint(vocab, 0.1)
 
-    fun addBeliefVariables(newVars: Set<RandomVariable>, timeOfUpdate: Int, seqTrials: List<SequentialTrial>, expertEv: List<DirEdge>, dbnInfo: DBNInfo): DBNInfo {
-        val oldVocab = dbnInfo.bestPInfos.keys
+        val cptsITI = initialCPTsITI(vocab, vocab.associate { Pair(it, vocab.toSet()) },  pseudoCountSize)
+        val dbn = cptsITIToDBN(cptsITI, priorJointParams, pseudoCountSize)
+
+        return DBNInfo(emptyMap(), emptyMap(), cptsITI, priorJointParams, dbn, emptyMap(), timeStep)
+    }
+
+    override fun trialUpdate(seqTrial: SequentialTrial, trialHistory: List<SequentialTrial>, expertEv: List<DirEdge>, timeOfUpdate: TimeStamp, dbnInfo: DBNInfo): DBNInfo {
+        val cptsITI = dbnInfo.cptsITI.mapValues { (_, cpt) -> Pair(incrementalUpdate(cpt.first, listOf(seqTrial), cpt.second), cpt.second) }
+        val dbn = cptsITIToDBN(cptsITI, dbnInfo.priorJointParams, pseudoCountSize)
+
+        return dbnInfo.copy(dbn = dbn, cptsITI = cptsITI)
+    }
+
+    override fun addBeliefVariables(newVars: Set<RandomVariable>, timeOfUpdate: Int, seqTrials: List<SequentialTrial>, expertEv: List<DirEdge>, dbnInfo: DBNInfo): DBNInfo {
+        val oldVocabUpdatedJointPriorParams = dbnInfo.cptsITI.mapValues { (rv, cpt) -> convertToJointProbTree(rv, cpt.first, dbnInfo.priorJointParams[rv]!!, pseudoCountSize) }
+        val newVarJointParamPriors = unifStartIDTransJoint(newVars, 0.1)
+        val finalJointParamPrior = oldVocabUpdatedJointPriorParams + newVarJointParamPriors
+
+        val updatedVocab = dbnInfo.vocab + newVars
+        val bestParents = updatedVocab.associate { Pair(it, updatedVocab) }
+
+        val cptsITI = initialCPTsITI(updatedVocab, bestParents, pseudoCountSize)
+        val dbn = cptsITI.mapValues { (rv, cpt) -> convertToCPT(rv, cpt.first, oldVocabUpdatedJointPriorParams[rv]!!, pseudoCountSize) }
+
+        return DBNInfo(emptyMap(), emptyMap(), cptsITI, finalJointParamPrior, dbn, emptyMap(), timeOfUpdate)
+    }
+
+}
+
+class BuntineUpdater(private val structUpdateInterval : Int,
+                     private val aliveThresh: Double,
+                     private val pseudoCountSize : Double,
+                     private val singleParentProb : Double) : DBNUpdater {
+
+    override fun addBeliefVariables(newVars: Set<RandomVariable>, timeOfUpdate: Int, seqTrials: List<SequentialTrial>, expertEv: List<DirEdge>, dbnInfo: DBNInfo): DBNInfo {
+        val oldVocab = dbnInfo.vocab
         val oldVocabReasonablePs = structuralUpdate(oldVocab, seqTrials, expertEv, dbnInfo.pSetPriors, aliveThresh, dbnInfo.priorJointParams, pseudoCountSize)
         val oldVocabBest = bestParents(oldVocabReasonablePs)
         val oldVocabCPTs = dbnInfo.cptsITI.mapValues { (rv, cpt) -> changeAllowedVocab(cpt, oldVocabBest[rv]!!.parentSet) }
@@ -67,28 +120,28 @@ class BuntineUpdater(private val aliveThresh: Double, private val pseudoCountSiz
         val finalJointParamPrior = oldVocabUpdatedJointPriorParams + newVarJointParamPriors
 
         val bestParents = bestParents(finalReasonableParents)
-        val cptsITI = initialCPTsITI(oldVocab + newVars, bestParents, finalJointParamPrior, pseudoCountSize)
-        val dbn = oldVocabCPTs.mapValues { (rv, cpt) -> convertToCPT(rv, cpt.first, oldVocabUpdatedJointPriorParams[rv]!!, pseudoCountSize) }
+        val cptsITI = initialCPTsITI(oldVocab + newVars, bestParents.mapValues { it.value.parentSet }, pseudoCountSize)
+        val dbn = cptsITI.mapValues { (rv, cpt) -> convertToCPT(rv, cpt.first, finalJointParamPrior[rv]!!, pseudoCountSize) }
 
-        return DBNInfo(finalReasonableParents, bestParents, cptsITI, oldVocabUpdatedJointPriorParams, dbn, finalLogPriors, timeOfUpdate)
+        return DBNInfo(finalReasonableParents, bestParents, cptsITI, finalJointParamPrior, dbn, finalLogPriors, timeOfUpdate)
     }
 
-    fun initialDBNInfo(vocab: Set<RandomVariable>, expertEv: List<DirEdge>, timeStep: TimeStamp): DBNInfo {
+    override fun initialDBNInfo(vocab: Set<RandomVariable>, expertEv: List<DirEdge>, timeStep: TimeStamp): DBNInfo {
         val priorJointParams = unifStartIDTransJoint(vocab, 0.1)
         val pSetPriors = initialPSetPriors(vocab, singleParentProb)
         val reasonableParents = structuralUpdate(vocab, emptyList(), expertEv, pSetPriors, aliveThresh, priorJointParams, pseudoCountSize)
         val bestPInfos = bestParents(reasonableParents)
-        val cptsITI = initialCPTsITI(vocab, bestPInfos, priorJointParams, pseudoCountSize)
+        val cptsITI = initialCPTsITI(vocab, bestPInfos.mapValues { it.value.parentSet }, pseudoCountSize)
         val dbn = cptsITIToDBN(cptsITI, priorJointParams, pseudoCountSize)
 
         return DBNInfo(reasonableParents, bestPInfos, cptsITI, priorJointParams, dbn, pSetPriors, timeStep)
     }
 
-    fun trialUpdate(seqTrial : SequentialTrial, trialHistory : List<SequentialTrial>, expertEv : List<DirEdge>, timeOfUpdate: TimeStamp, dbnInfo: DBNInfo) : DBNInfo{
+    override fun trialUpdate(seqTrial : SequentialTrial, trialHistory : List<SequentialTrial>, expertEv : List<DirEdge>, timeOfUpdate: TimeStamp, dbnInfo: DBNInfo) : DBNInfo{
         var newReasonableParents = dbnInfo.reasonableParents.mapValues { (rv, rps) -> parameterUpdate(rv, rps, seqTrial, expertEv, dbnInfo.pSetPriors[rv]!!, pseudoCountSize ) }
         var lastStructUpdate = dbnInfo.lastStructUpdate
 
-        if(timeOfUpdate - dbnInfo.lastStructUpdate > 50){
+        if(timeOfUpdate - dbnInfo.lastStructUpdate > structUpdateInterval){
             lastStructUpdate = timeOfUpdate
             newReasonableParents = newReasonableParents.mapValues { (rv, _) -> structuralUpdate(rv, dbnInfo.pSetPriors[rv]!!, dbnInfo.vocab, trialHistory, expertEv, dbnInfo.priorJointParams[rv]!!, aliveThresh, pseudoCountSize) }
         }
@@ -200,7 +253,11 @@ fun emptyCounts(child : RandomVariable, pSet : PSet) =
 
 fun priorParamTable(pSet: PSet, dt : DecisionTree<Factor>) : Map<RVAssignment, Factor> =
     allAssignments(pSet.toList()).associate { pAssign ->
-        Pair(pAssign, jointQuery(pAssign, dt))
+        // You should probably delete this and just replace with a version of joint query that can handle parent assignments
+        val testCombo = pAssign
+            .mapKeys { Pair(it.key, it.value) }
+            .mapValues { true }
+        Pair(pAssign, jointQuery(testCombo, dt))
     }
 
 fun <V> siblings(node : LatticeNode<V>) : List<LatticeNode<V>> =
@@ -315,10 +372,6 @@ fun posteriorToPrior(rpLogProbs: Map<RandomVariable, Map<PSet, Double>>, oldVoca
     return ParentExtResult(priorFuncs, newReasonable)
 }
 
-fun mapFromPrior(vocab : Set<RandomVariable>, logPrior: LogPrior<PSet>) : Map<PSet, Double>{
-    return Sets.powerSet(vocab).associate { Pair(it, logPrior(it)) }
-}
-
 fun inOutPrior(pSet : PSet, inLogProb : Double, outLogProb : Double, priorMap : Map<PSet, Double>, totalPSets : Int) =
     if(pSet in priorMap){
         inLogProb + priorMap[pSet]!!
@@ -326,46 +379,3 @@ fun inOutPrior(pSet : PSet, inLogProb : Double, outLogProb : Double, priorMap : 
     else{
         outLogProb + Math.log(1.0 / (totalPSets - priorMap.size))
     }
-
-/*
-fun bestParents(parentChoices : Map<RandomVariable, Map<PSet, Double>>) : DBNStruct =
-    parentChoices.mapValues{ (_, reasonableParents) -> reasonableParents.maxBy { it.value }!!.key}
-
-fun <T> parentToChildMap(parentMap : Map<T, Set<T>>) : Map<T, Set<T>>{
-    val vocab = parentMap.keys
-    return parentMap.mapValues { (parent, _) ->
-        vocab.filter { child -> parent in parentMap[child]!! }.toSet()
-    }
-}
-
-
-fun uselessVariables(vocab : Set<RandomVariable>, dbnStructs : List<DBNStruct>, rewardScope : Set<RandomVariable>) : List<RandomVariable> {
-    val descendantsPerDBN = dbnStructs.map { descendants(vocab, it) }
-    val nonRewardScope = vocab.filter { it !in rewardScope }
-    return nonRewardScope
-        .filter { rv ->
-            !descendantsPerDBN.any{ descendants ->
-                descendants[rv]!!.any{ it in rewardScope}
-            }
-        }
-}
-
-fun descendants(vocab : Set<RandomVariable>, dbnStruct : DBNStruct) : Map<RandomVariable, Set<RandomVariable>>{
-    val childMap = parentToChildMap(dbnStruct)
-    val descendants = HashMap(childMap)
-
-    var changed = false
-    while(!changed){
-        for(rv in vocab){
-            val oldDescendants = descendants[rv]!!
-            val nextStep = oldDescendants.flatMap{ descendants[it]!! }.toSet()
-            val newDescendants = oldDescendants + nextStep
-            if (oldDescendants != newDescendants){
-                changed = true
-                descendants[rv] = newDescendants
-            }
-        }
-    }
-    return descendants
-}
-*/

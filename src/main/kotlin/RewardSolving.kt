@@ -239,10 +239,11 @@ fun unfactoredReward(rewardDom: List<RandomVariable>,
     System.loadLibrary("jniortools")
     val solver = Solver("Reward Function Solver")
 
+    println("Reward Dom Size: ${rewardDom.size} : $rewardDom")
     val rewards = existsStates.map { it.reward }
     val rewardCSPSymbols = rewardToCSPSymbols(rewards, 1E-5)
 
-    val numAssignments = pow(2, rewardDom.size)
+    val numAssignments = rewardDom.productBy { it.domainSize }
     val numSymbols = (rewardCSPSymbols.keys.size - 1).toLong()
     val stateDecisionVars = solver.makeIntVarArray(numAssignments, 0, numSymbols)
 

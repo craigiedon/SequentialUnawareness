@@ -1,1 +1,4 @@
 build
+*.gv
+*.gv.pdf
+*.pyc

@@ -31,9 +31,7 @@ class BuntineTests{
     fun revisedAliveList_emptyList_illegalStateException(){
         val originalList = listOf<PSetNode>()
         val pSetInfos = emptyMap<PSet, SeqPInfo>()
-        val expected = originalList
-
-        val result = revisedAliveList(0.1, originalList, pSetInfos)
+        revisedAliveList(0.1, originalList, pSetInfos)
     }
 
     @Test
@@ -54,7 +52,7 @@ class BuntineTests{
     @Test
     fun structuralUpdate_emptyVocab_onlyReasonableIsEmptyList(){
         val priorJointParams = DTLeaf(Factor(listOf(A), listOf(0.1, 0.9)))
-        val logPrior : (PSet) -> Double = { pSet -> -2.0 }
+        val logPrior : (PSet) -> Double = { _ -> -2.0 }
         val trials = emptyList<SequentialTrial>()
         val vocab = setOf<RandomVariable>()
 
@@ -67,13 +65,13 @@ class BuntineTests{
 
     @Test
     fun structuralUpdate_singleVocabReasonable_singleAndEmptyReasonable(){
-        val priorJointParams = DTDecision(A, listOf(
+        val priorJointParams = DTDecision(Pair(A,0),
             DTLeaf(Factor(listOf(A), listOf(0.05, 0.45))),
             DTLeaf(Factor(listOf(A), listOf(0.45, 0.05)))
-        ))
+        )
 
         val pseudoCountStrength = 5.0
-        val logPrior : (PSet) -> Double = { pSet -> Math.log(0.5)}
+        val logPrior : (PSet) -> Double = { _ -> Math.log(0.5)}
         val trials = emptyList<SequentialTrial>()
         val vocab = setOf(A)
 
@@ -89,10 +87,10 @@ class BuntineTests{
 
     @Test
     fun structuralUpdate_priorDisallowsSingleVocab_onlyEmptyReasonable(){
-        val priorJointParams = DTDecision(A, listOf(
+        val priorJointParams = DTDecision(Pair(A,0),
             DTLeaf(Factor(listOf(A), listOf(0.05, 0.45))),
             DTLeaf(Factor(listOf(A), listOf(0.45, 0.05)))
-        ))
+        )
 
         val pseudoCountStrength = 5.0
         val logPrior : (PSet) -> Double = { pSet ->
@@ -138,13 +136,13 @@ class BuntineTests{
 
     @Test
     fun structuralUpdate_twoParentsVastlyPopular_everythingElseUnreasonable(){
-        val priorJointParams = DTDecision(A, listOf(
+        val priorJointParams = DTDecision(Pair(A,0),
             DTLeaf(Factor(listOf(A), listOf(0.1, 0.9))),
-            DTDecision(B, listOf(
+            DTDecision(Pair(B,0),
                 DTLeaf(Factor(listOf(A), listOf(0.1,0.9))),
                 DTLeaf(Factor(listOf(A), listOf(0.1,0.9)))
-            ))
-        ))
+            )
+        )
 
         val pseudoCountStrength = 5.0
         val logPrior : (PSet) -> Double = { pSet ->
@@ -324,7 +322,7 @@ class BuntineTests{
 
     @Test
     fun trialUpdate_staleReasonableParentsButWaitingPeriodUnmet_sameReasonableParents(){
-        val bUpd = BuntineUpdater(0.01, 5.0, 0.1)
+        val bUpd = BuntineUpdater(100, 0.01, 5.0, 0.1)
         val seqTrial = SequentialTrial(mapOf(A to 0), "A1", mapOf(A to 1), 0.0)
         val trialHistory = repeatList(
             listOf(
@@ -354,14 +352,14 @@ class BuntineTests{
         val reasonableParents = mapOf(A to listOf(reasonableParent1, reasonableParent2))
         val bestPInfos = mapOf(A to reasonableParents[A]!![0])
 
-        val dbnInfo = DBNInfo(reasonableParents, bestPInfos, emptyMap(), emptyMap(), emptyMap(), mapOf(A to { pSet -> 1.0 }), 0)
+        val dbnInfo = DBNInfo(reasonableParents, bestPInfos, emptyMap(), emptyMap(), emptyMap(), mapOf(A to { _ -> 1.0 }), 0)
         val result = bUpd.trialUpdate(seqTrial, trialHistory, emptyList(), 1, dbnInfo)
         Assert.assertEquals(2, result.reasonableParents[A]!!.size)
     }
 
     @Test
     fun trialUpdate_staleReasonableParentsWaitingPeriodMet_differentReasonableParents(){
-        val bUpd = BuntineUpdater(0.01, 5.0, 0.1)
+        val bUpd = BuntineUpdater(100, 0.01, 5.0, 0.1)
         val seqTrial = SequentialTrial(mapOf(A to 0), "A1", mapOf(A to 1), 0.0)
         val trialHistory = repeatList(
             listOf(
@@ -400,7 +398,7 @@ class BuntineTests{
 
     @Test
     fun initialDBNInfo_SingleVariable_InitialResult(){
-        val bUpd = BuntineUpdater(0.001, 5.0, 0.1)
+        val bUpd = BuntineUpdater(100, 0.001, 5.0, 0.1)
         val result = bUpd.initialDBNInfo(setOf(A), emptyList(), 0)
         Assert.assertEquals(2, result.reasonableParents[A]!!.size)
         Assert.assertEquals(emptySet<RandomVariable>(), result.bestPInfos[A]!!.parentSet)
@@ -410,11 +408,6 @@ class BuntineTests{
 
     @Test
     fun posteriorToPrior_twoVocabWithOneReasonableEach_NewRVAddedOnAndMixed(){
-        val jointPriorParamsOldVocab = mapOf(
-            A to DTLeaf(Factor(listOf(A), listOf(0.4, 0.6))),
-            B to DTLeaf(Factor(listOf(B), listOf(0.9, 0.1)))
-        )
-
         val oldLogProbs = mapOf(
             A to mapOf(setOf(A) to Math.log(1.0)),
             B to mapOf(emptySet<RandomVariable>() to Math.log(1.0))
@@ -435,17 +428,13 @@ class BuntineTests{
 
     @Test
     fun addBeliefVariables_twoVocabOneNewRV_correctlyUpdatedResult(){
-        val bUpd = BuntineUpdater(0.01, 5.0, 0.1)
+        val bUpd = BuntineUpdater(100, 0.01, 5.0, 0.1)
 
         val jointPriorParamsOldVocab = mapOf(
             A to DTLeaf(Factor(listOf(A), listOf(0.4, 0.6))),
             B to DTLeaf(Factor(listOf(B), listOf(0.9, 0.1)))
         )
 
-        val oldLogProbs = mapOf(
-            A to mapOf(setOf(A) to Math.log(1.0)),
-            B to mapOf(emptySet<RandomVariable>() to Math.log(1.0))
-        )
 
         val AParent = SeqPInfo(A, setOf(A), Math.log(1.0), emptyMap(), emptyMap())
         val BParent = SeqPInfo(B, setOf(B), Math.log(1.0), emptyMap(), emptyMap())
@@ -455,7 +444,7 @@ class BuntineTests{
         )
 
         val bestPInfos = mapOf(A to AParent, B to BParent)
-        val logPriors : Map<RandomVariable, (PSet) -> Double> = mapOf(A to { pSet -> Math.log(1.0) }, B to { pSet -> Math.log(1.0) })
+        val logPriors : Map<RandomVariable, (PSet) -> Double> = mapOf(A to { _ -> Math.log(1.0) }, B to { _ -> Math.log(1.0) })
 
         val updateConfig = ITIUpdateConfig<SequentialTrial, Int>({1}, { x, y -> true}, { x  -> 1.0}, 1.0, setOf(A,B))
         val cptsITI = mapOf(
@@ -466,7 +455,9 @@ class BuntineTests{
         val dbnInfo = DBNInfo(reasonableParents, bestPInfos, cptsITI, jointPriorParamsOldVocab, jointPriorParamsOldVocab, logPriors, 0)
         val result = bUpd.addBeliefVariables(setOf(C), 0, emptyList(), emptyList(), dbnInfo)
 
-        Assert.assertEquals(dbnInfo.dbn, result.priorJointParams)
+        Assert.assertEquals(dbnInfo.dbn[A]!!, result.priorJointParams[A])
+        Assert.assertEquals(dbnInfo.dbn[B]!!, result.priorJointParams[B])
+        Assert.assertTrue(result.dbn.containsKey(C))
         Assert.assertEquals(Math.log(0.1 * 0.1 * 0.9), result.pSetPriors[C]!!(setOf(A, B)), 10E-10)
         Assert.assertEquals(7, result.reasonableParents[C]!!.size)
     }
