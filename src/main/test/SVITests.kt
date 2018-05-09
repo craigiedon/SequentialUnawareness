@@ -42,6 +42,66 @@ class SVITests{
     )
 
     @Test
+    fun convertToCPT_deterministicParamPrior_deterministicDBN(){
+        val itiDT = ITIDecision<SequentialTrial, Int>(emptyMap(), emptyMap(), Pair(T, 2),
+            ITILeaf(mapOf(Pair(T, 2) to true), emptyMap(), emptyList(), mutableMapOf(2 to 4), false),
+            ITIDecision(mapOf(Pair(T, 2) to false), emptyMap(), Pair(T, 1),
+                ITILeaf(mapOf(Pair(T, 2) to false, Pair(T, 1) to true), emptyMap(), emptyList(), mutableMapOf(1 to 3), false),
+                ITILeaf(mapOf(Pair(T, 2) to false, Pair(T, 1) to false), emptyMap(), emptyList(), mutableMapOf(0 to 4), false),
+                false),
+            false
+        )
+
+        val jointParamPrior = DTDecision(Pair(T, 2),
+            DTLeaf(Factor(listOf(T), listOf(0.0,0.0,1.0 / 3.0))),
+            DTDecision(Pair(T, 1),
+                DTLeaf(Factor(listOf(T), listOf(0.0, 1.0 / 3.0, 0.0))),
+                DTLeaf(Factor(listOf(T), listOf(1.0 / 3.0, 0.0, 0.0)))
+            )
+        )
+
+        val expected = DTDecision(Pair(T, 2),
+            DTLeaf(Factor(listOf(T), listOf(0.0,0.0,1.0))),
+            DTDecision(Pair(T, 1),
+                DTLeaf(Factor(listOf(T), listOf(0.0, 1.0, 0.0))),
+                DTLeaf(Factor(listOf(T), listOf(1.0, 0.0, 0.0)))
+            )
+        )
+        val result = convertToCPT(T, itiDT, jointParamPrior, 1.0)
+        Assert.assertEquals(expected, result)
+    }
+
+    @Test
+    fun convertToCPT_deterministicParamPriorButDifferentStructure_deterministicDBN(){
+        val itiDT = ITIDecision<SequentialTrial, Int>(emptyMap(), emptyMap(), Pair(T, 2),
+            ITILeaf(mapOf(Pair(T, 2) to true), emptyMap(), emptyList(), mutableMapOf(2 to 4), false),
+            ITIDecision(mapOf(Pair(T, 2) to false), emptyMap(), Pair(T, 1),
+                ITILeaf(mapOf(Pair(T, 2) to false, Pair(T, 1) to true), emptyMap(), emptyList(), mutableMapOf(1 to 3), false),
+                ITILeaf(mapOf(Pair(T, 2) to false, Pair(T, 1) to false), emptyMap(), emptyList(), mutableMapOf(0 to 4), false),
+                false),
+            false
+        )
+
+        val jointParamPrior = DTDecision(Pair(T, 1),
+            DTLeaf(Factor(listOf(T), listOf(0.0, 1.0 / 3.0, 0.0))),
+            DTDecision(Pair(T, 0),
+                DTLeaf(Factor(listOf(T), listOf(1.0 / 3.0, 0.0, 0.0))),
+                DTLeaf(Factor(listOf(T), listOf(0.0, 0.0, 1.0 / 3.0)))
+            )
+        )
+
+        val expected = DTDecision(Pair(T, 2),
+            DTLeaf(Factor(listOf(T), listOf(0.0,0.0,1.0))),
+            DTDecision(Pair(T, 1),
+                DTLeaf(Factor(listOf(T), listOf(0.0, 1.0, 0.0))),
+                DTLeaf(Factor(listOf(T), listOf(1.0, 0.0, 0.0)))
+            )
+        )
+        val result = convertToCPT(T, itiDT, jointParamPrior, 1.0)
+        Assert.assertEquals(expected, result)
+    }
+
+    @Test
     fun identicalReward_emptyPTree(){
         val vTree = DTLeaf(1.0)
         val pTree = pRegress(vTree, dbn)
@@ -89,6 +149,24 @@ class SVITests{
         val dt2 = dt1
         val result = merge(listOf(dt1, dt2), {map1, map2 -> map1 + map2 }, ::doubleEquality)
         Assert.assertEquals(dt1, result)
+    }
+
+    @Test
+    fun pRegress_ternaryNode_failNotDeemedRelevant(){
+        val dt = DTDecision(Pair(T, 0),
+            DTLeaf(5),
+            DTDecision(Pair(T, 1),
+                DTLeaf(3),
+                DTLeaf(4)
+            )
+        )
+
+        val t0DetMap = mapOf(T to Factor(listOf(T), listOf(1.0, 0.0, 0.0)))
+
+        val dbn = mapOf(T to DTLeaf(Factor(listOf(T), listOf(1.0, 0.0, 0.0))))
+        val expected = DTLeaf(t0DetMap)
+        val result = pRegress(dt, dbn)
+        Assert.assertEquals(expected, result)
     }
 
     @Test

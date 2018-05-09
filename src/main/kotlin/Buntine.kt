@@ -61,7 +61,7 @@ interface DBNUpdater{
 
 class DegrisUpdater(val pseudoCountSize : Double) : DBNUpdater{
     override fun initialDBNInfo(vocab: Set<RandomVariable>, expertEv: List<DirEdge>, timeStep: TimeStamp): DBNInfo {
-        val priorJointParams = unifStartIDTransJoint(vocab, 0.1)
+        val priorJointParams = unifStartIDTransJoint(vocab)
 
         val cptsITI = initialCPTsITI(vocab, vocab.associate { Pair(it, vocab.toSet()) },  pseudoCountSize)
         val dbn = cptsITIToDBN(cptsITI, priorJointParams, pseudoCountSize)
@@ -78,7 +78,7 @@ class DegrisUpdater(val pseudoCountSize : Double) : DBNUpdater{
 
     override fun addBeliefVariables(newVars: Set<RandomVariable>, timeOfUpdate: Int, seqTrials: List<SequentialTrial>, expertEv: List<DirEdge>, dbnInfo: DBNInfo): DBNInfo {
         val oldVocabUpdatedJointPriorParams = dbnInfo.cptsITI.mapValues { (rv, cpt) -> convertToJointProbTree(rv, cpt.first, dbnInfo.priorJointParams[rv]!!, pseudoCountSize) }
-        val newVarJointParamPriors = unifStartIDTransJoint(newVars, 0.1)
+        val newVarJointParamPriors = unifStartIDTransJoint(newVars)
         val finalJointParamPrior = oldVocabUpdatedJointPriorParams + newVarJointParamPriors
 
         val updatedVocab = dbnInfo.vocab + newVars
@@ -110,8 +110,8 @@ class BuntineUpdater(private val structUpdateInterval : Int,
         val oldVocabUpdatedRPs = oldVocabUpdatedPSets.mapValues { (rv, pSets) -> pSets.map{ createPInfo(rv, it, emptyList(), oldVocabUpdatedlogPriors[rv]!!, oldVocabUpdatedJointPriorParams[rv]!!, pseudoCountSize, expertEv) } }
 
         // Create new param priors for new vocab
-        val newVarJointParamPriors = unifStartIDTransJoint(newVars, 0.1)
-        val newVarPriorFuncs = newVars.associate{ Pair(it, minParentsPrior(oldVocab + newVars, singleParentProb)) }
+        val newVarJointParamPriors = unifStartIDTransJoint(newVars)
+        val newVarPriorFuncs = newVars.associate{ Pair(it, minParentsPrior(it, oldVocab + newVars, singleParentProb)) }
         val newVarReasonablePs = structuralUpdate(oldVocab + newVars, emptyList(), expertEv, newVarPriorFuncs, aliveThresh, newVarJointParamPriors, pseudoCountSize)
 
         // Combine old and new vocab
@@ -127,7 +127,7 @@ class BuntineUpdater(private val structUpdateInterval : Int,
     }
 
     override fun initialDBNInfo(vocab: Set<RandomVariable>, expertEv: List<DirEdge>, timeStep: TimeStamp): DBNInfo {
-        val priorJointParams = unifStartIDTransJoint(vocab, 0.1)
+        val priorJointParams = unifStartIDTransJoint(vocab)
         val pSetPriors = initialPSetPriors(vocab, singleParentProb)
         val reasonableParents = structuralUpdate(vocab, emptyList(), expertEv, pSetPriors, aliveThresh, priorJointParams, pseudoCountSize)
         val bestPInfos = bestParents(reasonableParents)
@@ -160,11 +160,15 @@ class BuntineUpdater(private val structUpdateInterval : Int,
 }
 
 
-fun minParentsPrior(vocab : Set<RandomVariable>, extraParentCost : Double) : LogPrior<PSet>{
-    val singleParentProbabilities = vocab.associate { Pair(it, extraParentCost) }
+fun minParentsPrior(child : RandomVariable, vocab : Set<RandomVariable>, extraParentCost : Double) : LogPrior<PSet>{
     return { pSet -> vocab.sumByDouble { rv ->
-        val spCost = singleParentProbabilities[rv]!!
-        Math.log(if(rv in pSet) spCost else 1.0 - spCost)
+        Math.log(
+            when{
+                rv == child -> 0.5 // It is more likely that variable has itself as parent than some other variable
+                (rv in pSet) -> extraParentCost
+                else -> 1.0 - extraParentCost
+            }
+        )
     }}
 }
 

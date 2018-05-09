@@ -1,27 +1,29 @@
 import Utils.project
 import Utils.random
+import org.apache.commons.io.FilenameUtils
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
 
 fun main(args : Array<String>){
-    val mdp = loadMDP("mdps/medium-factory.json")
 
-    /*
-    val config = when(args.size){
-        0 -> loadJson("configs/degris.json", ExperimentConfig::class.java)
-        1 -> loadJson(args[0], ExperimentConfig::class.java)
-        else -> throw IllegalArgumentException("Wrong number of arguments")
-    }
-    */
-
-    val config = loadJson("configs/default.json", ExperimentConfig::class.java)
-
-    for(i in 0..20){
-        ResultsLogger.setPath("logs/fastFactory${config.experimentName}", i.toString())
-        runLearning(mdp, config)
+    if(args.size != 3){
+        throw IllegalArgumentException("3 Arguments Required: <mdp-file-path> <config-file-path> <experiment-id>")
     }
 
+    val mdpPath = args[0]
+    val mdpName = FilenameUtils.getBaseName(mdpPath)
+    val mdp = loadMDP(mdpPath)
+
+    val configPath = args[1]
+    val configName = FilenameUtils.getBaseName(configPath)
+    val config = loadJson(configPath, ExperimentConfig::class.java)
+
+    val logPath = "logs/$mdpName-$configName"
+    val taskId = args[2]
+
+    ResultsLogger.setPath(logPath, taskId)
+    runLearning(mdp, config)
 }
 
 data class ExperimentConfig(
@@ -270,7 +272,7 @@ fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPSets: Map<RandomVariabl
 
 fun initialPSetPriors(beliefVocab: Set<RandomVariable>, singleParentProb: Double) : Map<RandomVariable, LogPrior<PSet>> =
     beliefVocab.associate { rv ->
-        Pair(rv, minParentsPrior(beliefVocab, singleParentProb))
+        Pair(rv, minParentsPrior(rv, beliefVocab, singleParentProb))
     }
 
 
