@@ -1,6 +1,6 @@
 
 buildscript {
-    ext.kotlin_version = '1.1.0'
+    ext.kotlin_version = '1.2.0'
 
     repositories {
         mavenCentral()
@@ -24,6 +24,7 @@ repositories {
 
 dependencies {
     compile "org.jetbrains.kotlin:kotlin-stdlib-jre8:$kotlin_version"
+    compile group: 'commons-io', name: 'commons-io', version: '2.6'
     compile 'com.fasterxml.jackson.module:jackson-module-kotlin:2.7.5'
     compile group: 'org.apache.commons', name: 'commons-math3', version: '3.0'
     compile group: 'cc.mallet', name: 'mallet', version: '2.0.7-RC2'

@@ -98,13 +98,22 @@ fun variableEliminationQuery(queryVars: List<RandomVariable>, evidence: RVAssign
         return Factor(emptyList(), listOf(1.0))
     }
 
-    val eliminationVars = factors.flatMap { it.scope }.distinct().filter { !queryVars.contains(it) }
-    val prunedFactors = factors.map { evidenceApplicationPrune(evidence, it, queryVars) }
+    val eliminationVars = factors
+        .flatMap { it.scope }
+        .asSequence()
+        .distinct()
+        .filter { !queryVars.contains(it) }
+        .toList()
+
+    val prunedFactors = factors
+        .asSequence()
+        .map { evidenceApplicationPrune(evidence, it, queryVars) }
+        .map { applyEvidence(evidence, it)}
+        .toList()
 
     val unorderedFactor = normalize(variableElimination(prunedFactors, eliminationVars))
-    val orderedFactor = reorderFactor(unorderedFactor, queryVars)
 
-    return orderedFactor
+    return reorderFactor(unorderedFactor, queryVars)
 }
 
 fun variableEliminationQuery(queryAssignment : RVAssignment, bn : BayesNet) : Double{
@@ -137,7 +146,7 @@ fun evidenceApplicationPrune(evidence: Map<RandomVariable, Int>, fullFactor: Fac
 
     val reducedScopeStride = getStrides(reducedScope)
 
-    for(i in 0..numAssignments(reducedScope) - 1){
+    for(i in 0 until numAssignments(reducedScope)){
         val newScopeAssignment = indexToAssignment(i, reducedScopeStride, reducedScope).withIndex().associate { Pair(reducedScope[it.index], it.value) }
         val augmentedEvidenceIndex = assignmentToIndex(relevantEvidence + newScopeAssignment, fullFactor.scope)
         reducedProbTable[i] = fullFactor.values[augmentedEvidenceIndex]
@@ -152,7 +161,7 @@ fun applyEvidence(evidence : Map<RandomVariable, Int>, fullFactor : Factor) : Fa
     val relevantEvidenceScope = relevantEvidence.keys.toList()
     val evidenceAssignmentIndex = assignmentToIndex(relevantEvidence, relevantEvidenceScope)
 
-    val indicatorProbs = (0..numAssignments(relevantEvidenceScope) - 1).map { if (it == evidenceAssignmentIndex) 1.0 else 0.0 }
+    val indicatorProbs = (0 until numAssignments(relevantEvidenceScope)).map { if (it == evidenceAssignmentIndex) 1.0 else 0.0 }
     val indicatorFactor = Factor(relevantEvidenceScope, indicatorProbs)
     return product(indicatorFactor, fullFactor)
 }

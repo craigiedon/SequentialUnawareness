@@ -7,23 +7,28 @@ import java.io.PrintWriter
 
 fun main(args : Array<String>){
 
-    if(args.size != 3){
-        throw IllegalArgumentException("3 Arguments Required: <mdp-file-path> <config-file-path> <experiment-id>")
+    if(args.size != 4){
+        throw IllegalArgumentException("4 Arguments Required: <mdp-file> <awareness-file> <config-file> <experiment-id>")
     }
 
-    val mdpPath = args[0]
+    val mdpPath = FilenameUtils.concat("mdps", args[0])
     val mdpName = FilenameUtils.getBaseName(mdpPath)
     val mdp = loadMDP(mdpPath)
 
-    val configPath = args[1]
-    val configName = FilenameUtils.getBaseName(configPath)
-    val config = loadJson(configPath, ExperimentConfig::class.java)
+    val startingAwarenessPath = FilenameUtils.concat("startMDPs", args[1])
+    val startingAwarenessName = FilenameUtils.getBaseName(startingAwarenessPath)
+    val startingAwareness = loadJson(startingAwarenessPath, MDPAwareness::class)
 
-    val logPath = "logs/$mdpName-$configName"
-    val taskId = args[2]
+
+    val configPath = FilenameUtils.concat("configs", args[2])
+    val configName = FilenameUtils.getBaseName(configPath)
+    val config = loadJson(configPath, ExperimentConfig::class)
+
+    val logPath = "logs/$mdpName-$startingAwarenessName-$configName"
+    val taskId = args[3]
 
     ResultsLogger.setPath(logPath, taskId)
-    runLearning(mdp, config)
+    runLearning(mdp, startingAwareness, config)
 }
 
 data class ExperimentConfig(
@@ -32,10 +37,14 @@ data class ExperimentConfig(
     val exploreAmount: Double,
     val useTrue : Boolean,
     val expertAdviceInterval : Int,
+    val policyErrorTolerance : Double,
+    val maxEpisodeLength : Int,
     val prune: Boolean,
     val pruneRange: Double,
     val dbnUpdater : DBNUpdater
 )
+
+data class MDPAwareness(val variables : Set<String>, val actions : Set<Action>, val rewardDomain : Set<String>)
 
 
 object ResultsLogger{
@@ -47,6 +56,9 @@ object ResultsLogger{
         outputFolder = folderPath
         fileName = fName
         File(outputFolder).mkdirs()
+        File(outputFolder).listFiles()
+            .filter { it.name.startsWith(fName) }
+            .forEach { it.delete() }
     }
 
     fun logTimeStampedResult(timeStamp: TimeStamp, result : Double, metric : String){
@@ -63,7 +75,25 @@ object ResultsLogger{
             println("Expert Advised $betterAction over agent action $agentAction at time $timeStamp in state $state")
         }
         val writer = PrintWriter(FileWriter("${outputFolder!!}/${fileName!!}-expertBetterAction.txt", true))
-        writer.println("$timeStamp, $agentAction, $betterAction")
+        writer.println("$timeStamp, $state, $agentAction, $betterAction")
+        writer.close()
+    }
+
+    fun logBeliefMisunderstandingAdvice(earlierTime : TimeStamp, currentTime : TimeStamp, beliefVocabResolver : RandomVariable){
+        if(printToConsole){
+            println("Expert Resolved Misunderstanding at times $earlierTime, and $currentTime by mentioning $beliefVocabResolver")
+        }
+        val writer = PrintWriter(FileWriter("${outputFolder!!}/${fileName!!}-expertMisunderstanding.txt", true))
+        writer.println("$earlierTime, $currentTime, $beliefVocabResolver")
+        writer.close()
+    }
+
+    fun logUnexpectedRewardAdvice(timeStamp: TimeStamp, domainAdvice : Set<RandomVariable>){
+        if(printToConsole){
+            println("Expert Mentioned Reward Variables $domainAdvice at time $timeStamp")
+        }
+        val writer = PrintWriter(FileWriter("${outputFolder!!}/${fileName!!}-expertUnexpectedReward.txt", true))
+        writer.println("$timeStamp, $domainAdvice")
         writer.close()
     }
 
@@ -72,25 +102,18 @@ object ResultsLogger{
     }
 }
 
-fun nextState(proposedNextState : RVAssignment, trueMDP : MDP) : RVAssignment{
-    if(trueMDP.terminalDescriptions.any{ partialMatch(it, proposedNextState) }){
-            println("Terminal State Hit! Resetting...")
-            return generateInitialState(trueMDP.vocab.toList(), trueMDP.startStateDescriptions, trueMDP.terminalDescriptions)
-        }
-        else{
-            return proposedNextState
-        }
-}
 
-fun runLearning(trueMDP: MDP, config: ExperimentConfig){
-    val (truePolicy, trueValues) = structuredValueIteration(trueMDP.rewardTree, trueMDP.dbns, trueMDP.vocab.toList(), config.pruneRange)
+
+fun runLearning(trueMDP: MDP, startingAwareness : MDPAwareness, config: ExperimentConfig){
+    val (truePolicy, trueValues) = structuredValueIteration(trueMDP.rewardTree, trueMDP.dbns, trueMDP.vocab.toList(), trueMDP.terminalDescriptions, trueMDP.discount, config.pruneRange)
     val truePolicySize = numLeaves(truePolicy)
     val trueValueSize = numLeaves(trueValues)
-    val trueQs = trueMDP.dbns.mapValues { (_, dbn) -> regress(trueValues, trueMDP.rewardTree, dbn)}
-    val expert = Expert(config.expertAdviceInterval, 0.25, config.expertAdviceInterval, HashSet(), trueMDP, trueQs)
 
-    var agentVocab = trueMDP.vocab.toSet()
-    val agentActions = trueMDP.actions.toMutableSet()
+    val trueQs = trueMDP.dbns.mapValues { (_, dbn) -> regressRanged(trueValues, trueMDP.rewardTree, dbn, trueMDP.terminalDescriptions, trueMDP.discount)}
+    val expert = Expert(config.expertAdviceInterval, config.policyErrorTolerance, config.expertAdviceInterval, config.maxEpisodeLength, HashSet(), trueMDP, trueQs.mapValues{ fromRanged(it.value) })
+
+    var agentVocab = trueMDP.vocab.asSequence().filter { it.name in startingAwareness.variables }.toSet()
+    val agentActions = trueMDP.actions.asSequence().filter { it in startingAwareness.actions }.toMutableSet()
     val agentTrialHist = agentActions.associate { Pair(it, ArrayList<Pair<TimeStamp, SequentialTrial>>()) }.toMutableMap()
     val expertEv = emptyList<DirEdge>()
     val actionAdvice = HashMap<RVAssignment, Pair<TimeStamp, Action>>()
@@ -98,25 +121,24 @@ fun runLearning(trueMDP: MDP, config: ExperimentConfig){
     val agentDBNInfos = agentActions.associate{ Pair(it, config.dbnUpdater.initialDBNInfo(agentVocab, expertEv, 0))}.toMutableMap()
 
 
-    val initARewardScope = setOf(trueMDP.rewardScope.random())
+    val initARewardScope = trueMDP.rewardScope.asSequence().filter { it.name in startingAwareness.rewardDomain }.toSet()
     var agentRewardITI = emptyRewardTree(initARewardScope)
     var agentRewardDT = convertFromITI(agentRewardITI.first)
     var agentRangedValueTree : DecisionTree<Range> =  toRanged(agentRewardDT)
-    var agentPolicy = choosePolicy(agentDBNInfos.mapValues { (_, dbnInfo) -> regressRanged(agentRangedValueTree, agentRewardDT, dbnInfo.dbn) }, agentVocab.toList())
+    var agentPolicy = choosePolicy(agentDBNInfos.mapValues { (_, dbnInfo) -> regressRanged(agentRangedValueTree, agentRewardDT, dbnInfo.dbn, trueMDP.terminalDescriptions, trueMDP.discount) }, agentVocab.toList())
     val existRewardStates = ArrayList<Trial>()
 
     var previousState = generateInitialState(trueMDP.vocab.toList(), trueMDP.startStateDescriptions, trueMDP.terminalDescriptions)
 
-    var tStep = 0
-    while(tStep < config.numTrials){
+    for(tStep in 0 until config.numTrials){
         println(tStep)
         val projectedPrevState = project(previousState, agentVocab)
 
         val chosenAction = if(config.useTrue){
-            eGreedyWithAdvice(agentActions, truePolicy, actionAdvice, previousState, config.exploreAmount)
+            eGreedyWithAdvice(agentActions, truePolicy, actionAdvice, projectedPrevState, config.exploreAmount)
         }
         else{
-            eGreedyWithAdvice(agentActions, agentPolicy, actionAdvice, previousState, config.exploreAmount)
+            eGreedyWithAdvice(agentActions, agentPolicy, actionAdvice, projectedPrevState, config.exploreAmount)
         }
 
         println("Previous State: $previousState")
@@ -132,7 +154,7 @@ fun runLearning(trueMDP: MDP, config: ExperimentConfig){
 
         val agentSeqTrial = Pair(tStep, SequentialTrial(projectedPrevState, chosenAction, projectedNewState, reward))
         agentTrialHist[chosenAction]!!.add(agentSeqTrial)
-        expert.stateHist[tStep] = newTrueState
+        expert.episodeHistory.last().add(SequentialTrial(previousState, chosenAction, newTrueState, reward))
 
         // Reward Function Update
         val oldVocab = agentVocab
@@ -151,8 +173,7 @@ fun runLearning(trueMDP: MDP, config: ExperimentConfig){
             val solvableReward = unfactoredReward(agentRewardITI.second.vocab.toList() , existRewardStates)
             if(solvableReward == null){
                 val newRewardVars = whatsInRewardScope(agentRewardITI.second.vocab, expert)
-                println("Expert told agent about new reward vars: ${newRewardVars}")
-                tStep += 1
+                ResultsLogger.logUnexpectedRewardAdvice(tStep, newRewardVars)
                 agentVocab += newRewardVars
                 agentRewardITI = changeAllowedVocab(agentRewardITI, agentRewardITI.second.vocab + newRewardVars)
             }
@@ -163,7 +184,10 @@ fun runLearning(trueMDP: MDP, config: ExperimentConfig){
 
         // DBN Updates
         if(oldVocab != agentVocab){
-            agentDBNInfos.mapValues { (a, dbnInfo) -> config.dbnUpdater.addBeliefVariables(agentVocab - oldVocab, tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo) }
+            // Add the new belief variable to all previous DBNs, and wipe the trials
+            for((a, dbnInfo) in agentDBNInfos){
+                agentDBNInfos[a] = config.dbnUpdater.addBeliefVariables(agentVocab - oldVocab, tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo)
+            }
             agentTrialHist.forEach{ _, trials -> trials.clear() }
             actionAdvice.clear()
         }
@@ -171,21 +195,22 @@ fun runLearning(trueMDP: MDP, config: ExperimentConfig){
             agentDBNInfos[chosenAction] = config.dbnUpdater.trialUpdate(agentSeqTrial.second, agentTrialHist[chosenAction]!!.map{it.second}, expertEv, tStep, agentDBNInfos[chosenAction]!!)
         }
 
-
         // Better Action Advice
-        /*
-        expert.agentOptimalActionHistory.add(wasActionOptimal(previousState, chosenAction, trueQs))
-        if(tStep - expert.lastAdvice > expert.adviceInterval && !expert.agentOptimalActionHistory.last() && poorRecentPerformance(expert.agentOptimalActionHistory, expert.historyWindow, expert.mistakeProportion)){
+        if(
+            tStep - expert.lastAdvice > expert.adviceInterval &&
+            !wasActionOptimal(previousState, chosenAction, trueQs.mapValues { minVals(it.value) }) &&
+            (policyErrorEstimate(relevantEps(expert.episodeHistory, expert.lastAdvice), trueMDP.discount, trueMDP, minVals(trueValues)) > expert.policyErrorTolerance ||
+                expert.episodeHistory.last().size > expert.maxEpisodeLength)){
             // Then tell the agent about the better action
-            tStep += 1
             expert.lastAdvice = tStep
             val betterAction = betterActionAdvice(previousState, expert)
 
             ResultsLogger.logBetterActionAdvice(tStep, chosenAction, betterAction, previousState)
 
+            // Create a brand new DBN if action was previously unknown
             if(betterAction !in agentActions){
                 agentActions.add(betterAction)
-                agentDBNInfos[betterAction] = buntineUpdater.initialDBNInfo(agentVocab, expertEv, tStep)
+                agentDBNInfos[betterAction] = config.dbnUpdater.initialDBNInfo(agentVocab, expertEv, tStep)
                 agentTrialHist[betterAction] = ArrayList()
             }
 
@@ -198,45 +223,56 @@ fun runLearning(trueMDP: MDP, config: ExperimentConfig){
                 val earlierAdvice = actionAdvice[projectedPrevState]!!
                 val latestAdvice = Pair(agentSeqTrial.first, betterAction)
                 val resolution = resolveMisunderstanding(earlierAdvice.first, latestAdvice.first, expert)
-                tStep += 1
 
                 val resolutionVar = resolution.firstAssignment.first
                 if(resolutionVar in agentVocab){
                     throw IllegalStateException("If differing variable was already in agent vocab, then why was there a misunderstanding?")
                 }
+
+                ResultsLogger.logBeliefMisunderstandingAdvice(earlierAdvice.first, latestAdvice.first, resolutionVar)
+
                 actionAdvice.clear()
                 actionAdvice[projectedPrevState + resolution.firstAssignment] = earlierAdvice
                 actionAdvice[projectedPrevState + resolution.secondAssignment] = latestAdvice
 
                 agentVocab += resolutionVar
-                agentDBNInfos.mapValues { (a, dbnInfo) -> buntineUpdater.addBeliefVariables(setOf(resolutionVar), tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo) }
+
+                // Add the new belief variable to all previous DBNs, and wipe the trials
+                for((a, dbnInfo) in agentDBNInfos){
+                    agentDBNInfos[a] = config.dbnUpdater.addBeliefVariables(setOf(resolutionVar), tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo)
+                }
                 agentTrialHist.forEach { _, trials -> trials.clear() }
             }
         }
-        */
 
         // Policy Updates
         if(!config.useTrue){
-            val (newValue, newQTrees) = incrementalSVI(agentRewardDT, agentRangedValueTree, agentDBNInfos.mapValues {it.value.dbn}, agentVocab.toList(), config.pruneRange)
+            val (newValue, newQTrees) = incrementalSVI(agentRewardDT, agentRangedValueTree,
+                agentDBNInfos.mapValues {it.value.dbn}, agentVocab.toList(), trueMDP.terminalDescriptions, trueMDP.discount, config.pruneRange)
             agentRangedValueTree = newValue
             agentPolicy = choosePolicy(newQTrees, agentVocab.toList())
         }
 
         logNodeSizes(agentDBNInfos.mapValues { it.value.dbn }, fromRanged(agentRangedValueTree), tStep)
+        ResultsLogger.logTimeStampedResult(tStep, agentVocab.size.toDouble(), "VocabSize")
+        ResultsLogger.logTimeStampedResult(tStep, agentActions.size.toDouble(), "ActionsSize")
 
-        previousState = nextState(newTrueState, trueMDP)
-        tStep += 1
+        previousState = if(isTerminal(newTrueState, trueMDP)){
+            println("Terminal State Hit! Resetting...")
+            expert.episodeHistory.add(mutableListOf())
+            generateInitialState(trueMDP.vocab.toList(), trueMDP.startStateDescriptions, trueMDP.terminalDescriptions)
+        } else{
+            newTrueState
+        }
         println()
     }
 
-    if(config.useTrue){
-        ResultsLogger.logJSONStructure(truePolicy, "finalPolicy")
-    }
-    else{
-        ResultsLogger.logJSONStructure(agentPolicy, "finalPolicy")
-    }
+    val loggedPolicy = if(config.useTrue) truePolicy else agentPolicy
+    ResultsLogger.logJSONStructure(loggedPolicy, "finalPolicy")
 
+    // Log DBNs for each action
     agentDBNInfos.forEach { action, dbnInfo -> ResultsLogger.logJSONStructure(rawStructData(dbnInfo), "transition-$action") }
+    val finalPolicyError = policyErrorEstimate(relevantEps(expert.episodeHistory, expert.lastAdvice), trueMDP.discount, trueMDP, minVals(trueValues))
     println("Done")
 }
 
@@ -261,8 +297,11 @@ fun eGreedyWithAdvice(actions : Set<Action>, exploitPolicy : PolicyTree, expertA
     }
 }
 
-fun cptsITIToDBN(cptsITI: Map<RandomVariable, ProbTree>, jointParamPriors : Map<RandomVariable, DecisionTree<Factor>>, pseudoCountSize: Double) =
-    cptsITI.mapValues { (rv, pt) -> convertToCPT(rv, pt.first, jointParamPriors[rv]!!, pseudoCountSize)}
+
+/*
+fun convertToCPTNoPrior(cptsITI : Map<RandomVariable, ProbTree>) =
+    cptsITI.mapValues { (rv, pt) -> convertToCPTNoPrior(rv, pt.first) }
+*/
 
 
 fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPSets: Map<RandomVariable, PSet>, pseudoCountSize: Double): Map<RandomVariable, ProbTree> =

@@ -11,6 +11,9 @@ data class MDP(val vocab : Set<RandomVariable>,
     val rewardScope : Set<RandomVariable> get() = vocabInDT(rewardTree)
 }
 
+fun isTerminal(state : RVAssignment, mdp : MDP) =
+    mdp.terminalDescriptions.any{partialMatch(it, state)}
+
 fun dbnStruct(dbn : DynamicBayesNet) =
     dbn.mapValues { (_, dt) -> vocabInDT(dt) }
 

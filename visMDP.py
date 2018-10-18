@@ -6,7 +6,15 @@ import os
 import re
 
 
-def rec_show_dt(dt_node, dot):
+def straight_convert(v):
+    return str(v)
+
+
+def convert_range_string(range_val):
+    return "({:.3f},{:.3f})".format(range_val["lower"], range_val["upper"])
+
+
+def rec_show_dt(dt_node, dot, to_string_fun=straight_convert):
     node_id = str(uuid.uuid4())
     if "passBranch" in dt_node and "failBranch" in dt_node:
         rv_name = dt_node["rvTest"]["first"]["name"].upper()
@@ -14,14 +22,14 @@ def rec_show_dt(dt_node, dot):
         test_val = dt_node["rvTest"]["first"]["domain"][dt_node["rvTest"]["second"]]
         dot.node(node_id, label=rv_name.upper() + "=" + test_val, shape="oval")
         pass_child = dt_node["passBranch"]
-        pass_id = rec_show_dt(pass_child, dot)
+        pass_id = rec_show_dt(pass_child, dot, to_string_fun)
         dot.edge(node_id, pass_id, label="t")
 
         fail_child = dt_node["failBranch"]
-        fail_id = rec_show_dt(fail_child, dot)
+        fail_id = rec_show_dt(fail_child, dot, to_string_fun)
         dot.edge(node_id, fail_id, label="f")
     else:
-        dot.node(node_id, label=str(dt_node["value"]), shape="none")
+        dot.node(node_id, label=to_string_fun(dt_node["value"]), shape="none")
     return node_id
 
 
@@ -66,6 +74,15 @@ def show_policy_tree(problem_name, policy_tree):
                cleanup=True)
 
 
+def show_range_tree(problem_name, range_tree):
+    dot = Digraph(comment="Ranged Tree")
+    dot.attr("graph", label="Ranged Tree: ", labelloc="top")
+    rec_show_dt(range_tree, dot, convert_range_string)
+    dot.render(filename=problem_name + "-policy",
+               view=True,
+               cleanup=True)
+
+
 def show_all_dep_structures(structs_folder, test_name_prefix):
     file_matcher = test_name_prefix + r'-transition-(.*).json$'
     dep_struct_files = [x for x in os.listdir(structs_folder)
@@ -87,3 +104,8 @@ def load_json(file_path):
 def show_policy_from_file(file_path):
     policy_tree = load_json(file_path)
     show_policy_tree(os.path.splitext(file_path)[0], policy_tree)
+
+
+def show_range_tree_from_file(file_path):
+    range_tree = load_json(file_path)
+    show_range_tree(os.path.splitext(file_path)[0], range_tree)

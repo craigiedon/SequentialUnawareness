@@ -1,8 +1,8 @@
 {
-  "experimentName" : "DefaultFullLattice",
+  "experimentName" : "True",
   "numTrials" : 10000,
   "exploreAmount" : 0.1,
-  "useTrue" : false,
+  "useTrue" : true,
   "expertAdviceInterval" : 10,
   "policyErrorTolerance" : 0.1,
   "maxEpisodeLength" : 50,

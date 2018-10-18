@@ -1,0 +1,5 @@
+{
+  "variables" : ["asmooth","bshaped","skilledlab","typeneeded","bsmooth","ashaped","glue","bolts","spraygun","connected","apainted","bpainted","adrilled","bdrilled"],
+  "actions" : ["shapeb", "shapea", "polisha", "sprayb", "dipb", "handpainta", "spraya", "handpaintb", "polishb", "bolt", "dipa", "glue", "drillb", "drilla"],
+  "rewardDomain" : ["typeneeded", "connected", "apainted", "bpainted"]
+}

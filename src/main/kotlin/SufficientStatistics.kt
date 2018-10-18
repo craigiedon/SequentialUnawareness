@@ -2,6 +2,43 @@ import java.util.*
 
 typealias SufficientStats = Map<Set<RandomVariable>, CountTable>
 
+class SequentialCountTable(val prevScope : List<RandomVariable>, val nextScope : List<RandomVariable>, val counts : DoubleArray){
+    constructor(prevScope: List<RandomVariable>, nextScope: List<RandomVariable>) : this(prevScope, nextScope, DoubleArray(numAssignments(prevScope + nextScope)))
+    constructor(prevScope: List<RandomVariable>, nextScope: List<RandomVariable>, seqTrials : List<SequentialTrial>) : this(prevScope, nextScope){
+        updateCounts(seqTrials)
+    }
+
+    fun updateCounts(seqTrials : List<SequentialTrial>) {
+        seqTrials.forEach{ updateCounts(it) }
+    }
+
+    fun updateCounts(seqTrial : SequentialTrial){
+        counts[getIndex(seqTrial.prevState, seqTrial.currentState)] += 1.0
+    }
+
+    fun getCount(prevAssignment : RVAssignment, nextAssignment : RVAssignment) : Double{
+        return counts[getIndex(prevAssignment, nextAssignment)]
+    }
+
+    fun getMarginalCount(prevAssignment: RVAssignment) : Double =
+        allAssignments(nextScope).sumByDouble { getCount(prevAssignment, it) }
+
+    fun getConditionalCounts(prevAssignment: RVAssignment) : List<Double> {
+        val startIndex = getIndex(prevAssignment, nextScope.associate { Pair(it, 0) })
+        val endIndex = getIndex(prevAssignment, nextScope.associate { Pair(it, it.domainSize - 1) })
+        return counts.slice(startIndex..endIndex)
+    }
+
+    private fun getIndex(prevAssignment: RVAssignment, nextAssignment: RVAssignment) : Int{
+        val nextAssgnIndex = assignmentToIndex(nextAssignment, nextScope)
+        val prevAssgnIndex = assignmentToIndex(prevAssignment, prevScope)
+        return nextAssgnIndex + numAssignments(nextScope) * prevAssgnIndex
+    }
+
+    override fun toString(): String = "Prev: $prevScope, Next: $nextScope, ${counts.toList()}"
+}
+
+
 class CountTable(val scope : List<RandomVariable>, val counts : DoubleArray){
     constructor(scope : List<RandomVariable>) : this(scope, DoubleArray(numAssignments(scope)))
     constructor(scope : List<RandomVariable>, trials : List<RVAssignment>) : this(scope){

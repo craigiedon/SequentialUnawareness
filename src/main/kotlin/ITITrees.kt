@@ -335,11 +335,11 @@ fun <T, C> mergeTests(p1 : ITINode<T,C>, p2 : ITINode<T, C>) =
     mergeTests(p1.testCandidates, p2.testCandidates)
 
 fun <T> mergeTests(t1Stats: Map<RVTest, TestStats<T>>, t2Stats: Map<RVTest, TestStats<T>>) =
-    merge(t1Stats, t2Stats, { (rv1, tVal1, passCounts1, failCounts1), (_, _, passCounts2, failCounts2) ->
+    merge(t1Stats, t2Stats) { (rv1, tVal1, passCounts1, failCounts1), (_, _, passCounts2, failCounts2) ->
         TestStats(rv1, tVal1,
             merge(passCounts1, passCounts2, Int::plus),
             merge(failCounts1, failCounts2, Int::plus))
-    })
+    }
 
 fun <T, C> createStats(examples : List<T>, itiUpdateConfig: ITIUpdateConfig<T, C>) =
     createStats(itiUpdateConfig.vocab, examples, itiUpdateConfig.testChecker, itiUpdateConfig.exampleToClass)
@@ -352,10 +352,10 @@ fun <T, C> createStats(testVocab : Collection<RandomVariable>, examples: List<T>
 fun <T, C> createStat(testRV: RandomVariable, testVal : Int, examples : List<T>, testChecker: (RVTest, T) -> Boolean, classExtractor: (T) -> C) : TestStats<C> {
     val (passTrialCounts, failTrialCounts) = examples
         .partition { example -> testChecker(Pair(testRV, testVal), example) }
-        .map {
-            it.groupBy { classExtractor(it) }
-                .mapValues { it.value.size }
-                .toMutableMap()
+        .map { it
+            .groupBy { classExtractor(it) }
+            .mapValues { it.value.size }
+            .toMutableMap()
         }
     return TestStats(testRV, testVal, passTrialCounts, failTrialCounts)
 }
@@ -382,6 +382,23 @@ fun <T, C> addTrials(stat : TestStats<C>, examples: List<T>, testChecker: (RVTes
     }
 }
 
+fun BDsScore(rv : RandomVariable, pSet : PSet, countTable : SequentialCountTable, pseudoSampleSize: Double) : Double{
+    //val nonZeroParentAssignments = countTable.counts.count{ margCounts -> margCounts.any { it > 0 } }
+    val nonZeroAssignments = allAssignments(pSet.toList())
+        .asSequence()
+        .filter { pAssgn -> countTable.getMarginalCount(pAssgn) > 0 }
+
+    if(nonZeroAssignments.count() == 0) return Math.log(1.0)
+    val priorFactor = Factor(listOf(rv), repeatNum(1.0 / (nonZeroAssignments.count() * rv.domainSize), rv.domainSize))
+
+
+    val pAssignScores = nonZeroAssignments
+        .map{ pAssgn ->
+            BDePAssgn(countTable.getConditionalCounts(pAssgn), priorFactor, pseudoSampleSize)
+        }
+    return pAssignScores.sumByDouble { it }
+}
+
 fun BDsScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<Int>>, pseudoSampleSize: Double) : Double {
     val nonZeroParentAssignments = counts.values.count{ margCounts -> margCounts.any { it > 0 } }
     if(nonZeroParentAssignments == 0) return Math.log(1.0)
@@ -389,6 +406,7 @@ fun BDsScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<I
 
 
     val pAssignScores = allAssignments(pSet.toList())
+        .asSequence()
         .filter { pAssgn -> counts[pAssgn]!!.any { it > 0 } }
         .map{ pAssgn ->
             BDePAssgn(counts[pAssgn]!!, priorFactor, pseudoSampleSize)
@@ -403,12 +421,13 @@ fun BDsScore(rv : RandomVariable, splitCounts : List<List<Int>>, pseudoSampleSiz
     val priorFactor = Factor(listOf(rv), repeatNum(1.0 / nonZeroSplits * rv.domainSize, rv.domainSize))
 
     return splitCounts
+        .asSequence()
         .filter { counts -> counts.any { it > 0 } }
         .sumByDouble {  counts -> BDePAssgn(counts, priorFactor, pseudoSampleSize)
     }
 }
 
-fun BDePAssgn(counts: List<Int>, paramPrior: Factor, pseudoSampleSize: Double = 1.0) : Double{
+fun <T : Number> BDePAssgn(counts: List<T>, paramPrior: Factor, pseudoSampleSize: Double = 1.0) : Double{
 
     val betaNumeratorArgs = ArrayList<Double>()
     val betaDenominatorArgs = ArrayList<Double>()
@@ -416,7 +435,7 @@ fun BDePAssgn(counts: List<Int>, paramPrior: Factor, pseudoSampleSize: Double = 
     for((childVal, count) in counts.withIndex()){
         val pseudoCount = paramPrior.values[childVal] * pseudoSampleSize
 
-        betaNumeratorArgs.add(count + pseudoCount)
+        betaNumeratorArgs.add(count.toDouble() + pseudoCount)
         betaDenominatorArgs.add(pseudoCount)
     }
 
@@ -426,6 +445,23 @@ fun BDePAssgn(counts: List<Int>, paramPrior: Factor, pseudoSampleSize: Double = 
     return logBetaNumerator - logBetaDenominator
 }
 
+fun BDeUnnormed(rv : RandomVariable, pSet : PSet, countTable : SequentialCountTable, paramPrior : Factor, pseudoCountSize: Double) : Double {
+    return allAssignments(pSet.toList())
+        .sumByDouble{ pAssgn ->
+            BDePAssgnUnnormed(countTable.getConditionalCounts(pAssgn), paramPrior, pseudoCountSize)
+        }
+}
+
+fun <T : Number> BDePAssgnUnnormed(counts : List<T>, paramPrior : Factor, pseudoSampleSize : Double) : Double{
+    val betaNumeratorArgs = ArrayList<Double>()
+
+    for((childVal, count) in counts.withIndex()){
+        val pseudoCount = paramPrior.values[childVal] * pseudoSampleSize
+        betaNumeratorArgs.add(count.toDouble() + pseudoCount)
+    }
+
+    return logBeta(betaNumeratorArgs)
+}
 
 
 fun add(factors : List<Factor>) : Factor{
@@ -434,9 +470,12 @@ fun add(factors : List<Factor>) : Factor{
     }
 
     val newValues = factors
+        .asSequence()
         .map { it.values }
         .reduce { accProbs, currentProbs ->
-            accProbs.zip(currentProbs).map { (acc, current) -> acc + current }
+            accProbs
+                .zip(currentProbs)
+                .map { (acc, current) -> acc + current }
         }
 
     return Factor(factors[0].scope, newValues)

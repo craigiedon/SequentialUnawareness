@@ -44,12 +44,12 @@ fun random(lbInclusive : Int, ubExclusive : Int) : Int {
 }
 
 
-fun <T> sampleNoReplacement(vals : List<T>, numSamples : Int) : List<T>{
+fun <T> sampleNoReplacement(vals : Collection<T>, numSamples : Int) : List<T>{
     if(vals.size < numSamples){
         throw IllegalArgumentException("Samples asked for exceeds size of list")
     }
 
-    return shuffle(vals).take(numSamples)
+    return shuffle(vals.toList()).take(numSamples)
 }
 
 fun randomParams(parentStructure : Map<RandomVariable, Set<RandomVariable>>) : BayesNet {

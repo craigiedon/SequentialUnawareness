@@ -1,0 +1,5 @@
+{
+  "variables" : ["hrc", "r", "u", "huc", "l", "w"],
+  "actions" : ["buyc", "move", "getu", "delc"],
+  "reward-domain" : ["huc", "w"]
+}

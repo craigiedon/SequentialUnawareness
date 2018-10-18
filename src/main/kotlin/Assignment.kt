@@ -4,14 +4,14 @@ typealias  RVAssignment = Map<RandomVariable, Int>
 
 fun allAssignments(rvs : List<RandomVariable>) : List<RVAssignment>{
     val strides = getStrides(rvs)
-    return (0..numAssignments(rvs) - 1)
+    return (0 until numAssignments(rvs))
             .map { i -> indexToAssignment(i, strides, rvs).withIndex()
                     .associate { Pair(rvs[it.index], it.value) } }
 }
 
 
-fun numAssignments(rvs : Collection<RandomVariable>) = rvs.fold(1, {acc, rv -> acc * rv.domainSize})
-fun lnNumAssignments(rvs : Collection<RandomVariable>) = rvs.fold(0.0, {acc, rv -> acc + Math.log(rv.domainSize.toDouble())})
+fun numAssignments(rvs : Collection<RandomVariable>) = rvs.fold(1) { acc, rv -> acc * rv.domainSize}
+fun lnNumAssignments(rvs : Collection<RandomVariable>) = rvs.fold(0.0) { acc, rv -> acc + Math.log(rv.domainSize.toDouble())}
 
 fun getStrideConverter(originalScope: List<RandomVariable>, convertedScope: List<RandomVariable>) : List<Int>{
     val subScopeStride = getStrides(convertedScope)
@@ -48,12 +48,14 @@ fun convertIndex(index : Int, originalVocabOrdered : List<RandomVariable>, newVo
         else
             0
     }.toIntArray()
-    val convertedIndex = assignmentToIndex(convertedAssignment, getStrides(newVocab))
-    return convertedIndex
+    return assignmentToIndex(convertedAssignment, getStrides(newVocab))
 }
 
 fun assignmentToIndex(assignment : IntArray, stride : List<Int>) =
-        assignment.indices.sumBy { assignment[it] * stride[it] }
+    assignment.indices.sumBy { assignment[it] * stride[it] }
+
+fun assignmentToIndex(assignment : List<Int>, stride : List<Int>) =
+    assignment.indices.sumBy { assignment[it] * stride[it] }
 
 fun assignmentToIndex(assignment: RVAssignment, scope : List<RandomVariable>) : Int{
     val strides = getStrides(scope)

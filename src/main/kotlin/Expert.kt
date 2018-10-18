@@ -1,17 +1,39 @@
 import Utils.project
 import Utils.random
-
 data class Expert(
     val historyWindow: Int,
-    val mistakeProportion: Double,
+    val policyErrorTolerance: Double,
     val adviceInterval : Int,
+    val maxEpisodeLength : Int,
     val knownAgentVocab : MutableSet<RandomVariable>,
     val problemMDP : MDP,
     val qFuncs: Map<Action, QTree>
 ){
     val agentOptimalActionHistory = ArrayList<Boolean>()
-    val stateHist = HashMap<TimeStamp, RVAssignment>()
+    val episodeHistory : MutableList<MutableList<SequentialTrial>> = mutableListOf(ArrayList())
     var lastAdvice = 0
+    fun globalHistory(t : TimeStamp) : SequentialTrial{
+        val (epNum, localTime) = globalToLocal(episodeHistory, t)
+        return episodeHistory[epNum][localTime]
+    }
+
+}
+
+fun <T> globalToLocal(localHistories : List<List<T>>, t : TimeStamp) : Pair<Int, Int>{
+    var runningTotal = 0
+    for((epNum, episode) in localHistories.withIndex()){
+        if(runningTotal + episode.size > t){
+            val localTime = t - runningTotal
+            return Pair(epNum, localTime)
+        }
+        runningTotal += episode.size
+    }
+    throw IllegalArgumentException("Time stamp $t is greater than all current episodes")
+}
+
+fun relevantEps(epHistory : List<List<SequentialTrial>>, fromGlobalTime : TimeStamp) : List<List<SequentialTrial>> {
+    val untilEpsiode = globalToLocal(epHistory, fromGlobalTime).first
+    return epHistory.drop(untilEpsiode)
 }
 
 fun whatsInRewardScope(knownScope : Set<RandomVariable>, expert : Expert) : Set<RandomVariable>{
@@ -56,11 +78,50 @@ fun poorRecentPerformance(optimalActionHistory : List<Boolean>, horizon: Int, mi
     return mistakeProportion > mistakePropThresh
 }
 
+fun policyErrorEstimate(episodeHistory: List<List<SequentialTrial>>, discountFactor : Double, trueMDP : MDP, trueValues : DecisionTree<Double>) : Double{
+    if(episodeHistory.isEmpty())
+        return 0.0
+
+    val finishedReturns = episodeHistory
+        .dropLast(1)
+        .sumByDouble { discountedReturn(it, discountFactor)}
+
+    val lastEp = episodeHistory.last() // Question : What if episode history is empty?
+    if(lastEp.isEmpty())
+        return 0.0
+
+    val partialReturn = discountedReturn(lastEp, discountFactor)
+
+    // Question : What if final episode has no trials?
+    val lastEstimatedReturn = partialReturn + matchLeaf(trueValues, lastEp.last().currentState).value * Math.pow(discountFactor, lastEp.size.toDouble())
+
+    val policyQualityEstimate = (finishedReturns + lastEstimatedReturn) / episodeHistory.size
+
+    val startStates = allAssignments(trueMDP.vocab.toList())
+        .asSequence()
+        .filter { trueMDP.startStateDescriptions.isEmpty() || trueMDP.startStateDescriptions.any { startDesc -> partialMatch(startDesc, it) } }
+
+    val numStartStates = startStates.count()
+
+    val truePolicyQuality = startStates
+        .sumByDouble { startingState ->
+            (1.0 / numStartStates) * matchLeaf(trueValues, startingState).value
+        }
+
+    return maxOf(0.0, truePolicyQuality - policyQualityEstimate)
+}
+
+fun discountedReturn(rewards : List<SequentialTrial>, discount : Double) : Double =
+    rewards
+        .asSequence()
+        .withIndex()
+        .sumByDouble { (i, trial) -> Math.pow(discount, i.toDouble()) * trial.reward }
+
 data class MisunderstandingResolution(val firstAssignment : Pair<RandomVariable, Int>, val secondAssignment : Pair<RandomVariable, Int>)
 
 fun resolveMisunderstanding(t1: TimeStamp, t2: TimeStamp, expert: Expert) : MisunderstandingResolution {
-    val state1 = expert.stateHist[t1]!!
-    val state2 = expert.stateHist[t2]!!
+    val state1 = expert.globalHistory(t1).prevState
+    val state2 = expert.globalHistory(t2).prevState
     if(project(state1, expert.knownAgentVocab) != project(state2, expert.knownAgentVocab)){
         throw IllegalArgumentException("Agent is asking about conflict between two trials which it should see as different")
     }

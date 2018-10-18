@@ -105,7 +105,8 @@ def show_all(mdp):
 
 
 def main(file_path):
-    load_mdp(file_path)
+    mdp = load_mdp(file_path)
+    show_all(mdp)
 
 
 if __name__ == "__main__":

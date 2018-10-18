@@ -73,8 +73,8 @@ fun <X> List<X>.swapped(firstIndex: Int, secondIndex: Int): List<X> {
 
 fun <T> Pair<T, T>.contains(item : T) = this.first == item || this.second == item
 
-fun Collection<Int>.product() = this.fold(1, { a, b -> a * b })
-fun <T> Collection<T>.productByDouble(converter: (T) -> Double) = this.fold(1.0, { a, b -> a * converter(b) })
+fun Collection<Int>.product() = this.fold(1) { a, b -> a * b }
+fun <T> Collection<T>.productByDouble(converter: (T) -> Double) = this.fold(1.0) { a, b -> a * converter(b) }
 
 fun <T> Collection<T>.productBy(converter : (T) -> Int) = this.map{converter(it)}.product()
 
@@ -102,8 +102,32 @@ fun <K, V> merge(m1 : Map<K, V>, m2 : Map<K,V>, mergeFunc: (V, V) -> V) : Mutabl
     return newMap
 }
 
+/*
+fun <T, S> Collection<T>.scan(initValue: S, mergeFunc : (S, T) -> S) : List<S>{
+    val scanList = mutableListOf(initValue)
+    for(x in this){
+        scanList.add(mergeFunc(scanList.last(), x))
+    }
+    return scanList
+}
+*/
+
+fun <T> Collection<T>.scanLazy(mergeFunc : (T, T) -> T) =
+    this.asSequence().scanLazy(mergeFunc)
+
+fun <T> Sequence<T>.scanLazy(mergeFunc : (T, T) -> T) : Sequence<T>{
+    val iter = this.iterator()
+    if(!iter.hasNext()) throw java.lang.IllegalArgumentException("Cannot use scan on empty collection")
+    return generateSequence(Pair(iter.next(), 0)) { (acc, n) -> if(iter.hasNext()) Pair(mergeFunc(acc, iter.next()), n + 1) else null }
+        .map { it.first }
+}
+
 fun zeros(n : Int) : MutableList<Int>{
     return (1..n).map { 0 }.toMutableList()
+}
+
+fun zerosDouble(n : Int) : MutableList<Double>{
+    return (1..n).map { 0.0 }.toMutableList()
 }
 
 fun <T> allEqual(l1 : List<T>) : Boolean{

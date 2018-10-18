@@ -33,8 +33,12 @@ data class RVTable<out V>(val scope: List<RandomVariable>, val values: List<V>) 
     }
 
 
-    fun getValue(assignment : RVAssignment) =
-        values[assignmentToIndex(assignment, scope)]
+    fun getValue(assignment : RVAssignment) : V {
+        if(scope.toSet().size != scope.size){
+            throw IllegalArgumentException("Cant lookup factor by RV-Assignment Map if scope variables are repeated")
+        }
+        return values[assignmentToIndex(assignment, scope)]
+    }
 
     fun getValue(rv : RandomVariable, rvVal : Int) : V {
         if(scope.size != 1 || rv != scope[0])

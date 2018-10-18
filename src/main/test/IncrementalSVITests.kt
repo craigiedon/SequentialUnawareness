@@ -92,9 +92,39 @@ class IncrementalSVITests{
         val result = convertToCPT(A, probTree, priorParams, 5.0)
         val expected = DTDecision(Pair(A, 0),
             DTLeaf(Factor(listOf(A), listOf((3.0 + 1.25) / 6.5, (1.0 + 1.25) / 6.5))),
-            DTLeaf(Factor(listOf(A), listOf((0.0 + 1.25) / 3.5, (1.0 + 1.25) / 3.5)))
+            DTLeaf(Factor(listOf(A), listOf(0.0 , (1.0 + 1.25) / 2.25)))
         )
 
+        Assert.assertEquals(expected, result)
+    }
+
+    @Test
+    fun maxPosterior_noCounts_usePrior(){
+        val counts = mapOf(0 to 0, 1 to 0)
+        val priorParams = Factor(listOf(A), listOf(0.1, 0.9))
+
+        val expected = Factor(listOf(A), listOf(0.1, 0.9))
+        val result = maxPosteriorParams(A, counts, priorParams, 1.0)
+        Assert.assertEquals(expected, result)
+    }
+
+    @Test
+    fun maxPosterior_singleCount_useForOneSideKeepZeroParam(){
+        val counts = mapOf(0 to 0, 1 to 12)
+        val priorParams = Factor(listOf(A), listOf(0.1, 0.9))
+
+        val expected = Factor(listOf(A), listOf(0.0, 1.0))
+        val result = maxPosteriorParams(A, counts, priorParams, 1.0)
+        Assert.assertEquals(expected, result)
+    }
+
+    @Test
+    fun maxPosterior_allCounts_usePrior(){
+        val counts = mapOf(0 to 5, 1 to 5)
+        val priorParams = Factor(listOf(A), listOf(0.1, 0.9))
+
+        val expected = Factor(listOf(A), listOf(5.1 / 11.0, 5.9 / 11.0))
+        val result = maxPosteriorParams(A, counts, priorParams, 1.0)
         Assert.assertEquals(expected, result)
     }
 
@@ -125,6 +155,46 @@ class IncrementalSVITests{
     @Test
     fun jointQuery_partialPAssignment_addSpecificLeaves(){
         val parentAssignment = mapOf(Pair(A,0) to true)
+        val jointDT = DTDecision(Pair(B, 0),
+            DTDecision(Pair(A, 0),
+                DTLeaf(Factor(listOf(A), listOf(0.25, 0.05))),
+                DTLeaf(Factor(listOf(A), listOf(0.1, 0.1)))
+            ),
+            DTLeaf(Factor(listOf(A), listOf(0.2, 0.3)))
+        )
+
+        val result = jointQuery(parentAssignment, jointDT)
+        Assert.assertEquals(Factor(listOf(A), listOf(0.35, 0.2)), result)
+    }
+
+
+    @Test
+    fun jointQueryAssignment_fullAssignment_matchLeafAndReturn(){
+        val parentAssignment = mapOf(A to 0)
+        val jointDT = DTDecision(Pair(A, 0),
+            DTLeaf(Factor(listOf(A), listOf(0.05, 0.45))),
+            DTLeaf(Factor(listOf(A), listOf(0.2, 0.3)))
+        )
+
+        val result = jointQuery(parentAssignment, jointDT)
+        Assert.assertEquals(Factor(listOf(A), listOf(0.05, 0.45)), result)
+    }
+
+    @Test
+    fun jointQueryAssignment_emptyAssignment_addAllLeaves(){
+        val parentAssignment = emptyMap<RandomVariable, Int>()
+        val jointDT = DTDecision(Pair(A, 0),
+            DTLeaf(Factor(listOf(A), listOf(0.05, 0.45))),
+            DTLeaf(Factor(listOf(A), listOf(0.2, 0.3)))
+        )
+
+        val result = jointQuery(parentAssignment, jointDT)
+        Assert.assertEquals(Factor(listOf(A), listOf(0.25, 0.75)), result)
+    }
+
+    @Test
+    fun jointQueryAssignment_partialPAssignment_addSpecificLeaves(){
+        val parentAssignment = mapOf(A to 0)
         val jointDT = DTDecision(Pair(B, 0),
             DTDecision(Pair(A, 0),
                 DTLeaf(Factor(listOf(A), listOf(0.25, 0.05))),
@@ -196,7 +266,7 @@ class IncrementalSVITests{
             "A2" to mapOf(A to DTLeaf(Factor(listOf(A), listOf(0.0, 1.0))))
         )
 
-        val (valTreeResult, qTreesResult) = incrementalSVI(rewardTree, toRanged(valueTree), actionDBNs, listOf(A), 0.1)
+        val (valTreeResult, qTreesResult) = incrementalSVI(rewardTree, toRanged(valueTree), actionDBNs, listOf(A), emptyList(), 0.9, 0.1)
         val expectedValTree = DTDecision(Pair(A, 0),
             DTLeaf(Range(19.0, 19.0)),
             DTLeaf(Range(9.0, 9.0))

@@ -116,8 +116,8 @@ class SVITests{
     }
 
     @Test
-    fun TreeApendedToIdenticalTree_originalTree(){
-        val mapifiedZ = fMap(zCPD, {mapOf(it.scope.first() to it)})
+    fun treeApendedToIdenticalTree_originalTree(){
+        val mapifiedZ = fMap(zCPD) {mapOf(it.scope.first() to it)}
         Assert.assertTrue(checkEquality(mapifiedZ, append(mapifiedZ, mapifiedZ, {m1, m2 -> m1 + m2}, ::doubleEquality), ::doubleEquality))
     }
 
@@ -267,7 +267,7 @@ class SVITests{
             ),
             DTLeaf(19.0)
         )
-        val result = regress(rewardTree, rewardTree, dbn)
+        val result = regress(rewardTree, rewardTree, dbn, 0.9)
         Assert.assertTrue(checkEquality(expected, result, ::doubleEquality))
     }
 
@@ -317,7 +317,7 @@ class SVITests{
             ),
             DTLeaf(27.1)
         )
-        val result = regress(value1Step, rewardTree, dbn)
+        val result = regress(value1Step, rewardTree, dbn, 0.9)
 
         Assert.assertTrue(checkEquality(expected, result, ::doubleEquality))
     }
@@ -586,4 +586,112 @@ class SVITests{
         Assert.assertEquals(expected, result)
     }
 
+    @Test
+    fun terminalTree_coffeeStart(){
+        val huc = RandomVariable("huc", listOf("yes", "no"))
+        val terminalDescription = mapOf(huc to 0)
+        val terminalTree = terminalTree(terminalDescription)
+        val expectedTree = DTDecision(RVTest(huc, 0), DTLeaf(0.0), DTLeaf(Double.POSITIVE_INFINITY))
+
+        Assert.assertEquals(expectedTree, terminalTree)
+    }
+
+    @Test
+    fun terminalTree_factoryStart(){
+        val connected = RandomVariable("connected", listOf("good", "bad", "f"))
+        val terminalDescriptions = listOf(
+            mapOf(connected to 0),
+            mapOf(connected to 1)
+        )
+        val terminalTree = terminalTree(terminalDescriptions)
+        val expectedTree = DTDecision(RVTest(connected, 0), DTLeaf(0.0), DTDecision(RVTest(connected, 1), DTLeaf(0.0), DTLeaf(Double.POSITIVE_INFINITY)))
+
+        Assert.assertEquals(expectedTree, terminalTree)
+    }
+
+    @Test
+    fun structuredValueIteration_noTerminalStates_valueEqualsReward(){
+        val zKeepsValue = identityTransition(Z)
+        val terminalDescriptions = emptyList<RVAssignment>()
+        val (policyTree, valueTree) = structuredValueIteration(rewardTree, mapOf("A1" to mapOf(Z to zKeepsValue)), listOf(Z), terminalDescriptions, 0.9, 0.0)
+        Assert.assertEquals(Range(0.0, 0.0), matchLeaf(valueTree, mapOf(Z to 0)).value)
+        val z1Val = matchLeaf(valueTree, mapOf(Z to 1)).value.lower
+        Assert.assertTrue(Math.abs(100.0 - z1Val) <= 0.1)
+    }
+
+    @Test
+    fun structuredValueIteration_terminalStates_valueEqualsReward(){
+        val zKeepsValue = identityTransition(Z)
+        val terminalDescriptions = listOf(mapOf(Z to 1))
+        val (policyTree, valueTree) = structuredValueIteration(rewardTree, mapOf("A1" to mapOf(Z to zKeepsValue)), listOf(Z), terminalDescriptions, 0.9, 0.0)
+        Assert.assertEquals(Range(0.0, 0.0), matchLeaf(valueTree, mapOf(Z to 0)).value)
+        Assert.assertEquals(Range(10.0, 10.0), matchLeaf(valueTree, mapOf(Z to 1)).value)
+    }
+
+    @Test
+    fun structuredValueIteration_terminalStates_valueTreeExpanded(){
+        val zKeepsValue = identityTransition(Z)
+        val xKeepsValue = identityTransition(X)
+        val rTree = DTDecision(RVTest(Z, 1), DTLeaf(10.0), DTLeaf(1.0))
+        val terminalDescriptions = listOf(mapOf(X to 0))
+        val (policyTree, valueTree) = structuredValueIteration(rTree, mapOf("A1" to mapOf(Z to zKeepsValue, X to xKeepsValue)), listOf(Z, X), terminalDescriptions, 0.9, 0.0)
+
+        println(valueTree)
+        Assert.assertEquals(4, numLeaves(valueTree))
+        Assert.assertEquals(10.0, matchLeaf(valueTree, mapOf(X to 0, Z to 1)).value.lower, 0.1)
+        Assert.assertEquals(1.0, matchLeaf(valueTree, mapOf(X to 0, Z to 0)).value.lower, 0.1)
+        Assert.assertEquals(10.0, matchLeaf(valueTree, mapOf(X to 1, Z to 0)).value.lower, 0.1)
+        Assert.assertEquals(100.0, matchLeaf(valueTree, mapOf(X to 1, Z to 1)).value.lower, 0.1)
+    }
+
+    @Test
+    fun structuredValueIteration_terminalStates_valueTreePruned(){
+        val zKeepsValue = DTDecision(RVTest(Z, 1),
+            DTDecision(RVTest(X, 1),
+                DTLeaf(detFactor(Z, 1)),
+                DTLeaf(detFactor(Z, 0))
+                ),
+            DTDecision(RVTest(X, 1),
+                DTLeaf(detFactor(Z, 0)),
+                DTLeaf(detFactor(Z, 1))
+            )
+        )
+        val xKeepsValue = identityTransition(X)
+        val rTree = DTDecision(RVTest(Z, 1), DTLeaf(10.0), DTLeaf(1.0))
+        val terminalDescriptions = listOf(mapOf(Z to 1))
+        val (policyTree, valueTree) = structuredValueIteration(rTree, mapOf("A1" to mapOf(Z to zKeepsValue, X to xKeepsValue)), listOf(Z, X), terminalDescriptions, 0.9, 0.0)
+
+        println(valueTree)
+        Assert.assertEquals(3, numLeaves(valueTree))
+    }
+
+    @Test
+    fun structuredValueIteration_terminalStateMentionsPrevious_pruneCorrectly(){
+        val terminalTree : DecisionTree<Double> = terminalTree(mapOf(Z to 1))
+        val fvTree : DecisionTree<Double> = DTDecision(RVTest(Z, 1),
+            DTLeaf(5.0),
+            DTDecision(RVTest(X, 1),
+                DTLeaf(7.0),
+                DTLeaf(10.0))
+        )
+        val valueTree : DecisionTree<Double> = append(fvTree, terminalTree, {x,y -> minOf(x,y)}, {x,y -> doubleEquality(x, y)})
+
+        println(valueTree)
+        Assert.assertEquals(3, numLeaves(valueTree))
+    }
+
+    /*
+    @Test
+    fun structuredValueIteration_coffeeExample_policyAndValuesCorrect(){
+        val mdp = loadMDP("mdps/coffee.json")
+        val (policy, rangedValTree) = structuredValueIteration(mdp.rewardTree, mdp.dbns, mdp.vocab.toList(), mdp.terminalDescriptions, mdp.discount, 0.0)
+        var valTree = toRanged(mdp.rewardTree)
+        for(i in 1..10){
+            //saveToJson(policy, "logs/tests/policy")
+            valTree = incrementalSVI(mdp.rewardTree, valTree, mdp.dbns, mdp.vocab.toList(), mdp.terminalDescriptions, mdp.discount, 0.0).first
+            saveToJson(valTree, "logs/tests/valTree$i")
+        }
+        println("Done")
+    }
+    */
 }

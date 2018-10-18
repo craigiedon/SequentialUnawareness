@@ -1,5 +1,5 @@
 {
-  "experimentName" : "DefaultFullLattice",
+  "experimentName" : "noncon",
   "numTrials" : 10000,
   "exploreAmount" : 0.1,
   "useTrue" : false,
@@ -8,11 +8,9 @@
   "maxEpisodeLength" : 50,
   "pruneRange" : 0.01,
   "dbnUpdater" : {
-    "type": "buntine",
-    "structUpdateInterval" : 1000000,
+    "type": "noncon",
+    "singleParentProb" : 0.1,
     "maxParents" : 4,
-    "aliveThresh" : 0.00,
-    "pseudoCountSize" : 5.0,
-    "singleParentProb" : 0.1
+    "pseudoCountSize" : 5.0
   }
 }

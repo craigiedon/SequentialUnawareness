@@ -1,12 +1,15 @@
 {
   "experimentName" : "Degris",
-  "numTrials" : 4000,
+  "numTrials" : 10000,
   "exploreAmount" : 0.1,
   "useTrue" : false,
   "expertAdviceInterval" : 10,
-  "pruneRange" : 0.00,
+  "policyErrorTolerance" : 0.1,
+  "maxEpisodeLength" : 50,
+  "pruneRange" : 0.01,
   "dbnUpdater" : {
     "type": "degris",
-    "pseudoCountSize" : 1.0
+    "singleParentProb": 0.1,
+    "pseudoCountSize" : 5.0
   }
 }

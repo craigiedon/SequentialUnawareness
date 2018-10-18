@@ -1,3 +1,4 @@
+import com.fasterxml.jackson.annotation.JsonIgnore
 import java.util.*
 
 val A = RandomVariable("A", 2)
@@ -17,7 +18,7 @@ data class RandomVariable(val name : String, val domain : List<String>, val varT
     constructor(name : String, domainSize : Int, varType: VarType = VarType.BELIEF) : this(name, (0..domainSize - 1).map(Int::toString), varType)
 
     override fun toString() = name
-    val domainSize : Int get() = domain.size
+    val domainSize : Int @JsonIgnore get() = domain.size
 }
 
 enum class VarType { BELIEF, ACTION, OUTCOME }
