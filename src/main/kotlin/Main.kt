@@ -41,6 +41,7 @@ data class ExperimentConfig(
     val maxEpisodeLength : Int,
     val prune: Boolean,
     val pruneRange: Double,
+    val conserveVals : Boolean,
     val dbnUpdater : DBNUpdater
 )
 
@@ -48,7 +49,7 @@ data class MDPAwareness(val variables : Set<String>, val actions : Set<Action>, 
 
 
 object ResultsLogger{
-    val printToConsole = true
+    var printToConsole = true
     private var outputFolder : String? = null
     private var fileName: String? = null
 
@@ -188,6 +189,11 @@ fun runLearning(trueMDP: MDP, startingAwareness : MDPAwareness, config: Experime
             for((a, dbnInfo) in agentDBNInfos){
                 agentDBNInfos[a] = config.dbnUpdater.addBeliefVariables(agentVocab - oldVocab, tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo)
             }
+
+            if(!config.conserveVals){
+                agentRangedValueTree = toRanged(agentRewardDT)
+            }
+
             agentTrialHist.forEach{ _, trials -> trials.clear() }
             actionAdvice.clear()
         }
@@ -212,6 +218,10 @@ fun runLearning(trueMDP: MDP, startingAwareness : MDPAwareness, config: Experime
                 agentActions.add(betterAction)
                 agentDBNInfos[betterAction] = config.dbnUpdater.initialDBNInfo(agentVocab, expertEv, tStep)
                 agentTrialHist[betterAction] = ArrayList()
+
+                if(!config.conserveVals){
+                    agentRangedValueTree = toRanged(agentRewardDT)
+                }
             }
 
 
@@ -242,6 +252,10 @@ fun runLearning(trueMDP: MDP, startingAwareness : MDPAwareness, config: Experime
                     agentDBNInfos[a] = config.dbnUpdater.addBeliefVariables(setOf(resolutionVar), tStep, agentTrialHist[a]!!.map{it.second}, expertEv, dbnInfo)
                 }
                 agentTrialHist.forEach { _, trials -> trials.clear() }
+
+                if(!config.conserveVals){
+                    agentRangedValueTree = toRanged(agentRewardDT)
+                }
             }
         }
 
@@ -309,10 +323,17 @@ fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPSets: Map<RandomVariabl
         Pair(rv, emptyProbTree(rv, bestPSets[rv]!!, pseudoCountSize, 0.7))
     }
 
+
 fun initialPSetPriors(beliefVocab: Set<RandomVariable>, singleParentProb: Double) : Map<RandomVariable, LogPrior<PSet>> =
     beliefVocab.associate { rv ->
         Pair(rv, minParentsPrior(rv, beliefVocab, singleParentProb))
     }
 
-
+/*
+fun customPriorCPTsITI(agentVocab : Set<RandomVariable>, bestPSets: Map<RandomVariable, PSet>, jointParamPrior : DecisionTree<Factor>, pseudoCountSize: Double) : Map<RandomVariable, ProbTree>{
+    agentVocab.associate { rv ->
+        Pair(rv, emptyProbTree(rv, bestPSets[rv]!!, pseudoCountSize, 0.7))
+    }
+}
+*/
 

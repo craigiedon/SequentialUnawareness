@@ -2,6 +2,7 @@ import Utils.*
 import org.apache.commons.math3.special.Gamma
 
 data class SequentialTrial(val prevState : RVAssignment, val action : Action, val currentState : RVAssignment, val reward : Double)
+typealias BranchLabel = Map<RVTest, Boolean>
 
 data class ITIUpdateConfig<in T, C>(
     val exampleToClass : (T) -> C,
@@ -12,12 +13,12 @@ data class ITIUpdateConfig<in T, C>(
 )
 
 sealed class ITINode<T, C>{
-    abstract val branchLabel : Map<RVTest, Boolean>
+    abstract val branchLabel : BranchLabel
     abstract val testCandidates : Map<RVTest, TestStats<C>>
     abstract val stale : Boolean
 }
 data class ITILeaf<T, C>(
-    override val branchLabel : Map<RVTest, Boolean>,
+    override val branchLabel : BranchLabel,
     override val testCandidates: Map<RVTest, TestStats<C>>,
     val examples : List<T>,
     val counts : MutableMap<C, Int>,
@@ -25,7 +26,7 @@ data class ITILeaf<T, C>(
 ) : ITINode<T, C>()
 
 data class ITIDecision<T, C>(
-    override val branchLabel : Map<RVTest, Boolean>,
+    override val branchLabel : BranchLabel,
     override val testCandidates: Map<RVTest, TestStats<C>>,
     val currentTest: RVTest,
     val passBranch : ITINode<T,C>,
@@ -126,8 +127,7 @@ fun <T, C> changeAllowedVocab(itiTree : ITITree<T, C>, allowedVocab: Set<RandomV
                     val additionalTests = createStats(additionalVars, leafExamples, itiTree.second.testChecker, itiTree.second.exampleToClass)
                     val updatedTests = filteredTests + additionalTests
 
-                    val newLeaf = ITILeaf(node.branchLabel.toMap(), updatedTests, leafExamples, leafCounts, true)
-                    return newLeaf
+                    return ITILeaf(node.branchLabel.toMap(), updatedTests, leafExamples, leafCounts, true)
                 }
 
                 val newPassBranch = changeAllowedVocabRec(node.passBranch, allowedVocab)
