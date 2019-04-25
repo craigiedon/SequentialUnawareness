@@ -6,7 +6,8 @@
   "expertAdviceInterval" : 10,
   "policyErrorTolerance" : 0.5,
   "maxEpisodeLength" : 50,
-  "pruneRange" : 0.01,
+  "pruneRange" : 0.001,
+  "conserveVals": true,
   "dbnUpdater" : {
     "type": "buntine",
     "structUpdateInterval" : 1000000,

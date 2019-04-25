@@ -19,6 +19,52 @@ class BuntineTests{
     }
 
     @Test
+    fun seqPInfo_emptyCounts_nonZeroParentsZero(){
+        val pInfo = dummySeqPInfo(A, setOf(A,B), 1.0)
+        Assert.assertEquals(0, pInfo.nonZeroParentAssignments())
+    }
+
+    @Test
+    fun seqPInfo_fullCounts_fullNonZeroParentsCount(){
+        val pSet = setOf(A,B)
+        val priorFactor = Factor(listOf(A) + pSet, zerosDouble(numAssignments(listOf(A) + pSet)))
+        val trials = listOf(
+            SequentialTrial(mapOf(A to 0, B to 0), "a", mapOf(A to 0, B to 0), 5.0),
+            SequentialTrial(mapOf(A to 1, B to 0), "a", mapOf(A to 0, B to 0), 5.0),
+            SequentialTrial(mapOf(A to 0, B to 1), "a", mapOf(A to 0, B to 0), 5.0),
+            SequentialTrial(mapOf(A to 0, B to 1), "a", mapOf(A to 0, B to 0), 5.0),
+            SequentialTrial(mapOf(A to 1, B to 1), "a", mapOf(A to 1, B to 0), 5.0),
+            SequentialTrial(mapOf(A to 1, B to 1), "a", mapOf(A to 0, B to 0), 5.0)
+
+        )
+        val pInfo = SeqPInfo(A, setOf(A,B), 1.0, SequentialCountTable(pSet.toList(), listOf(A), trials), priorFactor)
+        Assert.assertEquals(4, pInfo.nonZeroParentAssignments())
+    }
+
+    @Test
+    fun seqPInfo_addTrial_increaseNonZeroCount(){
+        val pInfo = dummySeqPInfo(A, setOf(A,B), 1.0)
+        pInfo.addTrial(SequentialTrial(mapOf(A to 0, B to 0), "a", mapOf(A to 0, B to 0), 5.0))
+        Assert.assertEquals(1, pInfo.nonZeroParentAssignments())
+    }
+
+    @Test
+    fun seqPInfo_addSameTrialTwice_dontIncreaseNonZeroCount(){
+        val pInfo = dummySeqPInfo(A, setOf(A,B), 1.0)
+        pInfo.addTrial(SequentialTrial(mapOf(A to 0, B to 0), "a", mapOf(A to 0, B to 0), 5.0))
+        pInfo.addTrial(SequentialTrial(mapOf(A to 0, B to 0), "a", mapOf(A to 0, B to 0), 5.0))
+        Assert.assertEquals(1, pInfo.nonZeroParentAssignments())
+    }
+
+    @Test
+    fun seqPInfo_addDifferentTrialsButSameParents_dontIncreaseNonZeroCount(){
+        val pInfo = dummySeqPInfo(A, setOf(A,B), 1.0)
+        pInfo.addTrial(SequentialTrial(mapOf(A to 0, B to 0), "a", mapOf(A to 0, B to 0), 5.0))
+        pInfo.addTrial(SequentialTrial(mapOf(A to 0, B to 0), "a", mapOf(A to 1, B to 1), 5.0))
+        Assert.assertEquals(1, pInfo.nonZeroParentAssignments())
+    }
+
+    @Test
     fun bestParent_singleParent_chooseThisParent(){
         val singleParent = dummySeqPInfo(A, setOf(B), -10.0)
         val parentChoices = mapOf(A to listOf(singleParent))
@@ -475,7 +521,14 @@ class BuntineTests{
         val bestPInfos = mapOf(A to aParent, B to bParent)
         val logPriors : Map<RandomVariable, (PSet) -> Double> = mapOf(A to { _ -> Math.log(1.0) }, B to { _ -> Math.log(1.0) })
 
-        val updateConfig = ITIUpdateConfig<SequentialTrial, Int>({1}, { _, _ -> true}, { 1.0 }, 1.0, setOf(A,B))
+        val updateConfig = ITIUpdateConfig<SequentialTrial, Int>(
+            exampleToClass = {1},
+            testChecker = { _, _ -> true},
+            leafScoreFunc = { _, _ -> 1.0 },
+            splitScoreFunc = { _, _ -> 1.0 },
+            splitThresh = 1.0,
+            vocab = setOf(A,B)
+        )
         val cptsITI = mapOf(
             A to Pair(ITILeaf(emptyMap(), emptyMap(), emptyList(), HashMap(), false), updateConfig),
             B to Pair(ITILeaf(emptyMap(), emptyMap(), emptyList<SequentialTrial>(), HashMap<Int,Int>(), false), updateConfig)

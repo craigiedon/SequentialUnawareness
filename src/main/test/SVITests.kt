@@ -1,4 +1,5 @@
 import org.junit.*
+import java.lang.IllegalArgumentException
 
 class SVITests{
     val X = RandomVariable("X", 2)
@@ -663,6 +664,12 @@ class SVITests{
 
         println(valueTree)
         Assert.assertEquals(3, numLeaves(valueTree))
+    }
+
+    @Test(expected=IllegalArgumentException::class)
+    fun jointQuery_ConflictingAssignmentsImplicit_ZeroProbability(){
+        val jointDT = unifStartIDTransJoint(A)
+        val result = jointQuery(mapOf(Pair(A, 1) to true,Pair(A, 0) to true), jointDT)
     }
 
     @Test

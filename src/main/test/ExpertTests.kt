@@ -174,11 +174,15 @@ class ExpertTests{
 
     @Test
     fun policyErrorEstimate_emptyHistory_zeroError(){
-        policyErrorEstimate(emptyList(), 0.9, trueMDP, DTLeaf(5.0))
+        val startStates = allAssignments(trueMDP.vocab.toList())
+            .filter { trueMDP.startStateDescriptions.isEmpty() || trueMDP.startStateDescriptions.any { startDesc -> partialMatch(startDesc, it) } }
+        policyErrorEstimate(emptyList(), 0.9, trueMDP, startStates, DTLeaf(5.0))
     }
 
     @Test
     fun policyErrorEstimate_lastEpisodeEmpty_zeroErrorForThatEpisode(){
-        policyErrorEstimate(listOf(emptyList()), 0.9, trueMDP, DTLeaf(5.0))
+        val startStates = allAssignments(trueMDP.vocab.toList())
+            .filter { trueMDP.startStateDescriptions.isEmpty() || trueMDP.startStateDescriptions.any { startDesc -> partialMatch(startDesc, it) } }
+        policyErrorEstimate(listOf(emptyList()), 0.9, trueMDP, startStates, DTLeaf(5.0))
     }
 }

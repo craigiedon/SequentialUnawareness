@@ -78,7 +78,7 @@ fun poorRecentPerformance(optimalActionHistory : List<Boolean>, horizon: Int, mi
     return mistakeProportion > mistakePropThresh
 }
 
-fun policyErrorEstimate(episodeHistory: List<List<SequentialTrial>>, discountFactor : Double, trueMDP : MDP, trueValues : DecisionTree<Double>) : Double{
+fun policyErrorEstimate(episodeHistory: List<List<SequentialTrial>>, discountFactor : Double, trueMDP : MDP, startStates : List<RVAssignment>, trueValues : DecisionTree<Double>) : Double{
     if(episodeHistory.isEmpty())
         return 0.0
 
@@ -97,9 +97,6 @@ fun policyErrorEstimate(episodeHistory: List<List<SequentialTrial>>, discountFac
 
     val policyQualityEstimate = (finishedReturns + lastEstimatedReturn) / episodeHistory.size
 
-    val startStates = allAssignments(trueMDP.vocab.toList())
-        .asSequence()
-        .filter { trueMDP.startStateDescriptions.isEmpty() || trueMDP.startStateDescriptions.any { startDesc -> partialMatch(startDesc, it) } }
 
     val numStartStates = startStates.count()
 

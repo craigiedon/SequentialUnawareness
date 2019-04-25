@@ -29,6 +29,9 @@ fun sumOut(factor : Factor, sumOutVars : List<RandomVariable>) : Factor{
     return Factor(reducedVars, reducedVarProbs.toList())
 }
 
+fun scale(f1 : Factor, scale : Double) : Factor =
+    f1.copy(values = f1.values.map { it * scale })
+
 
 fun product(f1 : Factor, f2 : Factor) : Factor{
     /* I think the reason it is ok to ignore f1 here is that

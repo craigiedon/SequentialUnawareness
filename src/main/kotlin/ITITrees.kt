@@ -7,7 +7,8 @@ typealias BranchLabel = Map<RVTest, Boolean>
 data class ITIUpdateConfig<in T, C>(
     val exampleToClass : (T) -> C,
     val testChecker : (RVTest, T) -> Boolean,
-    val scoreFunc : (List<Map<C, Int>>) -> Double,
+    val leafScoreFunc : (BranchLabel, Map<C, Int>) -> Double,
+    val splitScoreFunc : (BranchLabel , TestStats<C>) -> Double,
     val splitThresh : Double,
     val vocab : Set<RandomVariable>
 )
@@ -44,13 +45,14 @@ typealias ProbNode = ITINode<SequentialTrial, Int>
 typealias PLeaf = ITILeaf<SequentialTrial, Int>
 typealias PDecision = ITIDecision<SequentialTrial, Int>
 
-fun probTreeConfig(rv : RandomVariable, vocab : Set<RandomVariable>, pseudoCountSize : Double, splitThresh : Double) =
+fun probTreeConfig(rv : RandomVariable, vocab : Set<RandomVariable>, jointParamPrior: DecisionTree<Factor>, pseudoCountSize : Double, splitThresh : Double) =
     ITIUpdateConfig<SequentialTrial, Int>(
-        { (_, _, currentState) -> currentState[rv]!! },
-        { rvTest, (prevState) -> prevState[rvTest.first] == rvTest.second },
-        { splitCounts -> BDsScore(rv, splitCounts.map { it.toOrderedList(rv) }, pseudoCountSize)},
-        splitThresh,
-        vocab
+        exampleToClass = { (_, _, currentState) -> currentState[rv]!! },
+        testChecker = { rvTest, (prevState) -> prevState[rvTest.first] == rvTest.second },
+        leafScoreFunc = { branchLabel, rvCounts -> leafScore(rv, branchLabel, rvCounts.toOrderedList(rv), jointParamPrior, pseudoCountSize)},
+        splitScoreFunc = { branchLabel, testStats -> splitterScore(rv, branchLabel, testStats, jointParamPrior, pseudoCountSize)},
+        splitThresh = splitThresh,
+        vocab = vocab
     )
 
 typealias RewardTree = ITITree<Trial, Double>
@@ -60,11 +62,12 @@ typealias RDecision = ITIDecision<Trial, Double>
 
 fun rewardTreeConfig(vocab : Set<RandomVariable>) =
     ITIUpdateConfig<Trial, Reward>(
-        { it.reward },
-        { rvTest, (assignment) -> assignment[rvTest.first] == rvTest.second } ,
-        { splitCounts -> splitCounts.sumByDouble(::weightedNegativeEntropy) },
-        0.0,
-        vocab
+        exampleToClass = { it.reward },
+        testChecker = { rvTest, (assignment) -> assignment[rvTest.first] == rvTest.second } ,
+        leafScoreFunc = { _, rvCounts -> weightedNegativeEntropy(rvCounts)},
+        splitScoreFunc = { _, testStat -> weightedNegativeEntropy(testStat.passTrialCounts) + weightedNegativeEntropy(testStat.failTrialCounts) },
+        splitThresh = 0.0,
+        vocab = vocab
     )
 
 fun emptyRewardTree(vocab : Set<RandomVariable>) : RewardTree {
@@ -72,8 +75,8 @@ fun emptyRewardTree(vocab : Set<RandomVariable>) : RewardTree {
     return Pair(emptyNode(config), config)
 }
 
-fun emptyProbTree(rv : RandomVariable, vocab : Set<RandomVariable>, pseudoCountSize : Double, splitThresh : Double) : ProbTree {
-    val config = probTreeConfig(rv, vocab, pseudoCountSize, splitThresh)
+fun emptyProbTree(rv : RandomVariable, vocab : Set<RandomVariable>, jointParamPrior: DecisionTree<Factor>, pseudoCountSize : Double, splitThresh : Double) : ProbTree {
+    val config = probTreeConfig(rv, vocab, jointParamPrior, pseudoCountSize, splitThresh)
     return Pair(emptyNode(config), config)
 }
 
@@ -205,16 +208,28 @@ fun <T, C> addExamples(itiNode: ITINode<T,C>, examples: List<T>, classExtractor 
 
 fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config: ITIUpdateConfig<T, C>) : ITINode<T,C>{
     if(dt.stale && dt.testCandidates.isNotEmpty()){
-        val testScores = dt.testCandidates
-            .mapValues{ (_, testStat) -> config.scoreFunc(listOf(testStat.passTrialCounts, testStat.failTrialCounts)) }
+        // We first want to filter out tests which cannot be chosen for impossibility reasons
+        val trueRVs = dt.branchLabel
+            .entries
+            .filter { (rvTest, rvVal) -> rvVal }
+            .map { it.key.first }
 
+        val testScores = dt.testCandidates
+            .filter { !(it.key in dt.branchLabel || it.key.first in trueRVs)}
+            .mapValues{ (_, testStat) -> config.splitScoreFunc(dt.branchLabel, testStat) }
+
+        if(testScores.isEmpty()){
+            return dt
+        }
+
+        // If we still have potential tests remaining, then try scoring them
         val (bestTest, bestScore) = testScores.entries.maxBy { it.value }!!
 
         when(dt){
             is ITIDecision -> {
-                val shouldRevise = bestTest != dt.currentTest &&
-                    bestScore - testScores[dt.currentTest]!! > config.splitThresh &&
-                    !dt.branchLabel.containsKey(bestTest)
+                // Note here: Still don't have the case where the empty test becomes best again...
+                val currentTestScore = testScores[dt.currentTest]
+                val shouldRevise = currentTestScore == null || (bestTest != dt.currentTest && bestScore - currentTestScore > config.splitThresh)
 
                 val revisedNode = if(shouldRevise)
                     transposeTree(dt, bestTest, vocab, config.testChecker, config.exampleToClass)
@@ -229,7 +244,7 @@ fun <T, C> ensureBestTest(dt: ITINode<T, C>, vocab : Set<RandomVariable>, config
                     failBranch = ensureBestTest(revisedNode.failBranch, vocab, config))
             }
             is ITILeaf -> {
-                val currentScore = config.scoreFunc(listOf(dt.counts))
+                val currentScore = config.leafScoreFunc(dt.branchLabel, dt.counts)
                 if(bestScore - currentScore > config.splitThresh) {
                     if(dt.branchLabel.containsKey(bestTest)){
                         println("Why are we putting this test in again?")
@@ -412,6 +427,38 @@ fun BDsScore(rv : RandomVariable, pSet : PSet, counts : Map<RVAssignment, List<I
             BDePAssgn(counts[pAssgn]!!, priorFactor, pseudoSampleSize)
         }
     return pAssignScores.sumByDouble { it }
+}
+
+fun leafScore(rv : RandomVariable, branchLabel: BranchLabel, counts : List<Int>, jointParamPrior : DecisionTree<Factor>, pseudoCountSize: Double) : Double{
+    val priorCounts = scale(jointQuery(branchLabel, jointParamPrior), pseudoCountSize)
+    val totalCounts = counts.zip(priorCounts.values).map { (a,b) -> a + b}
+    if(totalCounts.sum() == 0.0){
+        throw IllegalArgumentException("Leaf node for $rv doesn't have any counts ($counts) or even pseudo counts ($priorCounts)!")
+    }
+
+    val uniformPrior = Factor(listOf(rv), repeatNum(1.0 / rv.domainSize, rv.domainSize))
+
+    return BDePAssgn(totalCounts, uniformPrior)
+}
+
+fun splitterScore(rv : RandomVariable, branchLabel : BranchLabel, testStats : TestStats<Int>, jointParamPrior: DecisionTree<Factor>, pseudoCountSize : Double) : Double{
+    val rvTest = Pair(testStats.rv, testStats.testVal)
+
+    val passCounts = testStats.passTrialCounts.toOrderedList(rv)
+    val failCounts = testStats.failTrialCounts.toOrderedList(rv)
+
+    val passPrior = scale(jointQuery(branchLabel + Pair(rvTest, true), jointParamPrior), pseudoCountSize)
+    val failPrior = scale(jointQuery(branchLabel + Pair(rvTest, true), jointParamPrior), pseudoCountSize)
+
+    val passTotal = passCounts.zip(passPrior.values).map { (a,b) -> a + b }
+    val failTotal = failCounts.zip(failPrior.values).map { (a,b) -> a + b }
+
+    if(passTotal.sum() == 0.0 || failTotal.sum() == 0.0){
+        return Math.log(0.0)
+    }
+
+    val uniformPrior = Factor(listOf(rv), repeatNum(1.0 / rv.domainSize, rv.domainSize))
+    return BDePAssgn(passTotal, uniformPrior) + BDePAssgn(failTotal, uniformPrior)
 }
 
 fun BDsScore(rv : RandomVariable, splitCounts : List<List<Int>>, pseudoSampleSize: Double) : Double{

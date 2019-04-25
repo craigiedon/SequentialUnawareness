@@ -67,7 +67,8 @@ def show_agent_reward_tree(reward_tree):
 
 def show_policy_tree(problem_name, policy_tree):
     dot = Digraph(comment="Policy Tree")
-    dot.attr("graph", label="Policy Tree: ", labelloc="top")
+    # dot.attr("graph", label="Policy Tree: ", labelloc="top")
+    dot.attr("graph", margin="0.0")
     rec_show_dt(policy_tree, dot)
     dot.render(filename=problem_name + "-policy",
                view=True,

@@ -54,7 +54,7 @@ class IncrementalSVITests{
         val priorParams = DTLeaf(Factor(listOf(A), listOf(0.5, 0.5)))
 
 
-        val probConfig = probTreeConfig(A, setOf(A), 5.0, 0.7)
+        val probConfig = probTreeConfig(A, setOf(A), priorParams, 5.0, 0.7)
         val probTree = makeLeaf(trials, probConfig)
 
         val result = convertToCPT(A, probTree, priorParams, 5.0)
@@ -78,7 +78,7 @@ class IncrementalSVITests{
         )
 
 
-        val probConfig = probTreeConfig(A, setOf(A), 5.0, 0.7)
+        val probConfig = probTreeConfig(A, setOf(A), priorParams, 5.0, 0.7)
         val probTree = ITIDecision(
             emptyMap(),
             emptyMap(),
@@ -210,7 +210,7 @@ class IncrementalSVITests{
     @Test
     fun convertJointProbTree_Leaf_ScaleCounts(){
         val priorJointDT = DTLeaf(Factor(listOf(A), listOf(0.4, 0.6)))
-        val probConfig = probTreeConfig(A, setOf(A), 5.0, 0.7)
+        val probConfig = probTreeConfig(A, setOf(A), priorJointDT, 5.0, 0.7)
         val binaryPTree = makeLeaf(listOf(
             SequentialTrial(mapOf(A to 0), "A1", mapOf(A to 1), 0.0),
             SequentialTrial(mapOf(A to 1), "A1", mapOf(A to 0), 0.0)
@@ -229,7 +229,7 @@ class IncrementalSVITests{
         )
 
         val priorJointDT = DTLeaf(Factor(listOf(A), listOf(0.4, 0.6)))
-        val probConfig = probTreeConfig(A, setOf(A), 5.0, 0.7)
+        val probConfig = probTreeConfig(A, setOf(A), priorJointDT, 5.0, 0.7)
         val binaryPTree = ITIDecision(
             emptyMap(),
             createStats(setOf(A), trials, { test, trial -> trial.prevState[test.first] == test.second }, { trial -> trial.currentState[A]!! }),
@@ -347,7 +347,8 @@ class IncrementalSVITests{
 
     @Test
     fun changeAllowedVocab_SameVocab_SameLeaf(){
-        val probConfig = probTreeConfig(A, setOf(A, B), 5.0, 0.7)
+        val jointPriorDT = unifStartIDTransJoint(A)
+        val probConfig = probTreeConfig(A, setOf(A, B), jointPriorDT, 5.0, 0.7)
         val dtNode = makeLeaf(listOf(SequentialTrial(mapOf(A to 0, B to 0), "A1", mapOf(A to 0, B to 0), 5.0)), probConfig)
         val tree = Pair(dtNode, probConfig)
         val result = changeAllowedVocab(tree, setOf(A, B))
@@ -356,12 +357,13 @@ class IncrementalSVITests{
 
     @Test
     fun changeAllowedVocab_SmallerVocab_FilterTests(){
-        val probConfig = probTreeConfig(A, setOf(A, B), 5.0, 0.7)
+        val jointPriorDT = unifStartIDTransJoint(A)
+        val probConfig = probTreeConfig(A, setOf(A, B), jointPriorDT, 5.0, 0.7)
         val dtNode = makeLeaf(listOf(SequentialTrial(mapOf(A to 0, B to 0), "A1", mapOf(A to 0, B to 0), 5.0)), probConfig)
         val tree = Pair(dtNode, probConfig)
         val result = changeAllowedVocab(tree, setOf(A))
 
-        val expectedConfig = probTreeConfig(A, setOf(A), 5.0, 0.7)
+        val expectedConfig = probTreeConfig(A, setOf(A), jointPriorDT, 5.0, 0.7)
         val expectedTree = makeLeaf(listOf(SequentialTrial(mapOf(A to 0, B to 0), "A1", mapOf(A to 0, B to 0), 5.0)), expectedConfig, stale = true)
         Assert.assertEquals(expectedTree, result.first)
         Assert.assertEquals(expectedConfig.vocab, result.second.vocab)
@@ -369,12 +371,13 @@ class IncrementalSVITests{
 
     @Test
     fun changeAllowedVocab_LargerVocab_RecountAndExpandTests(){
-        val probConfig = probTreeConfig(A, setOf(A, B), 5.0, 0.7)
+        val jointPriorDT = unifStartIDTransJoint(A)
+        val probConfig = probTreeConfig(A, setOf(A, B), jointPriorDT, 5.0, 0.7)
         val dtNode = makeLeaf(listOf(SequentialTrial(mapOf(A to 1, B to 1, C to 1), "A1", mapOf(A to 0, B to 0), 5.0)), probConfig)
         val tree = Pair(dtNode, probConfig)
         val result = changeAllowedVocab(tree, setOf(A, B, C))
 
-        val expectedConfig = probTreeConfig(A, setOf(A, B, C), 5.0, 0.7)
+        val expectedConfig = probTreeConfig(A, setOf(A, B, C), jointPriorDT, 5.0, 0.7)
         val expectedTree = makeLeaf(listOf(SequentialTrial(mapOf(A to 1, B to 1, C to 1), "A1", mapOf(A to 0, B to 0), 5.0)), expectedConfig, stale = true)
         Assert.assertEquals(expectedTree, result.first)
         Assert.assertEquals(expectedConfig.vocab, result.second.vocab)
@@ -382,7 +385,8 @@ class IncrementalSVITests{
 
     @Test
     fun changeAllowedVocab_BranchingDecision_ApplyRecursively(){
-        val probConfig = probTreeConfig(A, setOf(A, B), 5.0, 0.7)
+        val jointPriorDT = unifStartIDTransJoint(A)
+        val probConfig = probTreeConfig(A, setOf(A, B), jointPriorDT, 5.0, 0.7)
         val trials = listOf(
             SequentialTrial(mapOf(A to 1, B to 1, C to 1), "A1", mapOf(A to 0, B to 0, C to 0), 5.0)
         )
@@ -394,7 +398,7 @@ class IncrementalSVITests{
             false
         )
         val result = changeAllowedVocab(Pair(dtNode, probConfig), setOf(A, B, C))
-        val expectedConfig = probTreeConfig(A, setOf(A, B, C), 5.0, 0.7)
+        val expectedConfig = probTreeConfig(A, setOf(A, B, C), jointPriorDT, 5.0, 0.7)
         val expectedDT = ITIDecision(emptyMap(),
             createStats(trials, expectedConfig),
             Pair(A, 1),
@@ -405,5 +409,22 @@ class IncrementalSVITests{
 
         Assert.assertEquals(expectedConfig.vocab, result.second.vocab)
         Assert.assertEquals(expectedDT, result.first)
+    }
+
+    @Test
+    fun initialCPT_strongInitialPrior_DeterministicDT(){
+        val jointPriorDT = unifStartIDTransJoint(setOf(A,B))
+        val result = initialCPTsITI(setOf(A,B), mapOf(A to setOf(A,B), B to setOf(A,B)), jointPriorDT, 2.0)
+        val dtA = result[A]!!.first as ITIDecision
+        val dtB = result[B]!!.first as ITIDecision
+
+        Assert.assertEquals(A, dtA.currentTest.first)
+        Assert.assertTrue(dtA.passBranch is ITILeaf)
+        Assert.assertTrue(dtA.failBranch is ITILeaf)
+
+        Assert.assertEquals(B, dtB.currentTest.first)
+        Assert.assertTrue(dtB.passBranch is ITILeaf)
+        Assert.assertTrue(dtB.failBranch is ITILeaf)
+
     }
 }

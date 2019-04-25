@@ -109,6 +109,8 @@ fun runLearning(trueMDP: MDP, startingAwareness : MDPAwareness, config: Experime
     val (truePolicy, trueValues) = structuredValueIteration(trueMDP.rewardTree, trueMDP.dbns, trueMDP.vocab.toList(), trueMDP.terminalDescriptions, trueMDP.discount, config.pruneRange)
     val truePolicySize = numLeaves(truePolicy)
     val trueValueSize = numLeaves(trueValues)
+    val startStates = allAssignments(trueMDP.vocab.toList())
+        .filter { trueMDP.startStateDescriptions.isEmpty() || trueMDP.startStateDescriptions.any { startDesc -> partialMatch(startDesc, it) } }
 
     val trueQs = trueMDP.dbns.mapValues { (_, dbn) -> regressRanged(trueValues, trueMDP.rewardTree, dbn, trueMDP.terminalDescriptions, trueMDP.discount)}
     val expert = Expert(config.expertAdviceInterval, config.policyErrorTolerance, config.expertAdviceInterval, config.maxEpisodeLength, HashSet(), trueMDP, trueQs.mapValues{ fromRanged(it.value) })
@@ -205,7 +207,7 @@ fun runLearning(trueMDP: MDP, startingAwareness : MDPAwareness, config: Experime
         if(
             tStep - expert.lastAdvice > expert.adviceInterval &&
             !wasActionOptimal(previousState, chosenAction, trueQs.mapValues { minVals(it.value) }) &&
-            (policyErrorEstimate(relevantEps(expert.episodeHistory, expert.lastAdvice), trueMDP.discount, trueMDP, minVals(trueValues)) > expert.policyErrorTolerance ||
+            (policyErrorEstimate(relevantEps(expert.episodeHistory, expert.lastAdvice), trueMDP.discount, trueMDP, startStates, minVals(trueValues)) > expert.policyErrorTolerance ||
                 expert.episodeHistory.last().size > expert.maxEpisodeLength)){
             // Then tell the agent about the better action
             expert.lastAdvice = tStep
@@ -286,7 +288,7 @@ fun runLearning(trueMDP: MDP, startingAwareness : MDPAwareness, config: Experime
 
     // Log DBNs for each action
     agentDBNInfos.forEach { action, dbnInfo -> ResultsLogger.logJSONStructure(rawStructData(dbnInfo), "transition-$action") }
-    val finalPolicyError = policyErrorEstimate(relevantEps(expert.episodeHistory, expert.lastAdvice), trueMDP.discount, trueMDP, minVals(trueValues))
+    val finalPolicyError = policyErrorEstimate(relevantEps(expert.episodeHistory, expert.lastAdvice), trueMDP.discount, trueMDP, startStates, minVals(trueValues))
     println("Done")
 }
 
@@ -318,9 +320,9 @@ fun convertToCPTNoPrior(cptsITI : Map<RandomVariable, ProbTree>) =
 */
 
 
-fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPSets: Map<RandomVariable, PSet>, pseudoCountSize: Double): Map<RandomVariable, ProbTree> =
+fun initialCPTsITI(agentVocab: Set<RandomVariable>, bestPSets: Map<RandomVariable, PSet>, jointPriorParams : Map<RandomVariable, DecisionTree<Factor>>, pseudoCountSize: Double): Map<RandomVariable, ProbTree> =
     agentVocab.associate { rv ->
-        Pair(rv, emptyProbTree(rv, bestPSets[rv]!!, pseudoCountSize, 0.7))
+        Pair(rv, emptyProbTree(rv, bestPSets[rv]!!, jointPriorParams[rv]!!, pseudoCountSize, 0.7))
     }
 
 

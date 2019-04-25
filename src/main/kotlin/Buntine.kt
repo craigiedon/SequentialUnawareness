@@ -9,7 +9,7 @@ typealias PSet = Set<RandomVariable>
 typealias DBNStruct = Map<RandomVariable, PSet>
 typealias DirEdge = Pair<RandomVariable, RandomVariable>
 
-data class SeqPInfo(val child : RandomVariable, val parentSet : PSet, val logProbability : Double, val counts : SequentialCountTable, val priorParams : Factor){
+data class SeqPInfo(val child : RandomVariable, val parentSet : PSet, val logProbability : Double, val counts : SequentialCountTable, val priorParams : Factor, private var nonZeroParentAssignments : Int? = null){
     init {
         if (priorParams.scope.first() != child || priorParams.scope.drop(1).toSet() != parentSet){
             throw IllegalArgumentException("Prior Param Scope ${priorParams.scope} does not match with PInfo variables ($child, $parentSet)")
@@ -17,6 +17,18 @@ data class SeqPInfo(val child : RandomVariable, val parentSet : PSet, val logPro
         if(counts.prevScope.toSet() != parentSet || counts.nextScope.toSet() != setOf(child)){
             throw IllegalArgumentException("Count Table scope (${counts.prevScope}, ${counts.nextScope}) does not match Seq PInfo scope ($parentSet, [$child])")
         }
+
+        // Caching non-zero parents to speed up scoring later
+        if(nonZeroParentAssignments == null){
+            nonZeroParentAssignments = allAssignments(parentSet.toList())
+                .asSequence()
+                .filter { pAssgn -> count(pAssgn) > 0 }
+                .count()
+        }
+    }
+
+    fun nonZeroParentAssignments() : Int{
+        return nonZeroParentAssignments!!
     }
 
     fun count(childVal : Int, prevAssignment: RVAssignment) =
@@ -26,11 +38,15 @@ data class SeqPInfo(val child : RandomVariable, val parentSet : PSet, val logPro
         (0 until child.domainSize).sumByDouble { count(it, parentAssignment) }
 
     fun addTrial(seqTrial: SequentialTrial){
+        if(count(seqTrial.prevState) == 0.0){
+            nonZeroParentAssignments = nonZeroParentAssignments!! + 1
+        }
         counts.updateCounts(seqTrial)
     }
 
     fun jointPrior(childVal : Int, parentAssgn : RVAssignment) : Double {
-        val index = assignmentToIndex(listOf(childVal) + priorParams.scope.map { parentAssgn[it]!! }, getStrides(priorParams.scope))
+        // Complex index translation required because there are often 2 assignments to variable X: one in the previous time step (parent) and one in the current (child)
+        val index = assignmentToIndex(listOf(childVal) + priorParams.scope.drop(1).map { parentAssgn[it]!! }, getStrides(priorParams.scope))
         return priorParams.values[index]
     }
 
@@ -82,7 +98,7 @@ class DegrisUpdater(private val singleParentProb : Double, private val pseudoCou
         val updatedVocab = dbnInfo.vocab + newVars
         val bestParents = updatedVocab.associate { Pair(it, updatedVocab) }
 
-        val cptsITI = initialCPTsITI(updatedVocab, bestParents, pseudoCountSize)
+        val cptsITI = initialCPTsITI(updatedVocab, bestParents, finalJointParamPrior, pseudoCountSize)
         val dbn = cptsITI
             .mapValues { (rv, cpt) -> convertToCPT(rv, cpt.first, finalJointParamPrior[rv]!!, pseudoCountSize) }
 
@@ -93,7 +109,7 @@ class DegrisUpdater(private val singleParentProb : Double, private val pseudoCou
         val priorJointParams = unifStartIDTransJoint(vocab)
 
         // All vocabulary is allowed in every CPT: Structure learning is not encapsulated, but rather explicit in DT learning
-        val cptsITI = initialCPTsITI(vocab, vocab.associate { Pair(it, vocab.toSet()) },  pseudoCountSize)
+        val cptsITI = initialCPTsITI(vocab, vocab.associate { Pair(it, vocab.toSet()) },  priorJointParams, pseudoCountSize)
         val dbn = convertToCPT(cptsITI, priorJointParams, pseudoCountSize)
 
         return DBNInfo(emptyMap(), emptyMap(), cptsITI, priorJointParams, dbn, emptyMap(), timeStep)
@@ -117,7 +133,7 @@ class NonConservativeUpdater(private val singleParentProb : Double, private val 
         val pSetPriors = initialPSetPriors(vocab, singleParentProb)
         val reasonableParents = structuralUpdate(vocab, emptyList(), expertEv, pSetPriors, 0.0, priorJointParams, maxParents)
         val bestPInfos = bestParents(reasonableParents)
-        val cptsITI = initialCPTsITI(vocab, bestPInfos.mapValues { it.value.parentSet }, pseudoCountSize)
+        val cptsITI = initialCPTsITI(vocab, bestPInfos.mapValues { it.value.parentSet }, priorJointParams, pseudoCountSize)
         val dbn = convertToCPT(cptsITI, priorJointParams, pseudoCountSize)
 
         return DBNInfo(reasonableParents, bestPInfos, cptsITI, priorJointParams, dbn, pSetPriors, timeStep)
@@ -168,7 +184,7 @@ class BuntineUpdater(private val structUpdateInterval : Int,
         val finalJointParamPrior = oldVocabUpdatedJointPriorParams + newVarJointParamPriors
 
         val bestParents = bestParents(finalReasonableParents)
-        val cptsITI = initialCPTsITI(oldVocab + newVars, bestParents.mapValues { it.value.parentSet }, pseudoCountSize)
+        val cptsITI = initialCPTsITI(oldVocab + newVars, bestParents.mapValues { it.value.parentSet }, finalJointParamPrior, pseudoCountSize)
         val dbn = cptsITI.mapValues { (rv, cpt) -> convertToCPT(rv, cpt.first, finalJointParamPrior[rv]!!, pseudoCountSize) }
 
         return DBNInfo(finalReasonableParents, bestParents, cptsITI, finalJointParamPrior, dbn, finalLogPriors, timeOfUpdate)
@@ -179,7 +195,7 @@ class BuntineUpdater(private val structUpdateInterval : Int,
         val pSetPriors = initialPSetPriors(vocab, singleParentProb)
         val reasonableParents = structuralUpdate(vocab, emptyList(), expertEv, pSetPriors, aliveThresh, priorJointParams, maxParents)
         val bestPInfos = bestParents(reasonableParents)
-        val cptsITI = initialCPTsITI(vocab, bestPInfos.mapValues { it.value.parentSet }, pseudoCountSize)
+        val cptsITI = initialCPTsITI(vocab, bestPInfos.mapValues { it.value.parentSet }, priorJointParams, pseudoCountSize)
         val dbn = convertToCPT(cptsITI, priorJointParams, pseudoCountSize)
 
         return DBNInfo(reasonableParents, bestPInfos, cptsITI, priorJointParams, dbn, pSetPriors, timeStep)
@@ -216,24 +232,31 @@ fun parameterUpdate(child : RandomVariable,
                     seqTrial : SequentialTrial,
                     expertEvidence : List<DirEdge>,
                     structuralPrior: LogPrior<PSet>) : List<SeqPInfo>{
+
+    val pseudoCountSize = 1.0
     val newReasonableParentSets = reasonableParents.map { pInfo ->
         //Sample counts are updated incrementally here
         pInfo.addTrial(seqTrial)
 
-        /*
         val parentAssgn = seqTrial.prevState.filterKeys { it in pInfo.parentSet }
         val childVal = seqTrial.currentState[child]!!
 
         val countJoint = pInfo.count(childVal, parentAssgn)
         val countMarginal = pInfo.count(parentAssgn)
 
-        val alphaJoint = alphaTotal * pInfo.jointPrior(childVal, parentAssgn)
-        val alphaMarginal = alphaTotal * pInfo.marginalPrior(parentAssgn)
+        // With BDsScore, should only need to do full rescoring if an assignment was previously 0
+        val newLogProb : Double
+        if(countMarginal.toInt() <= 1){
+            newLogProb = structuralPrior(pInfo.parentSet) + BDsScore(pInfo.child, pInfo.parentSet, pInfo.counts, pseudoCountSize)
+        }
+        else{
+            //Update Structural Probability
+            val alphaJoint = pseudoCountSize / (pInfo.nonZeroParentAssignments() * pInfo.child.domainSize)
+            val alphaMarginal = pseudoCountSize / (pInfo.nonZeroParentAssignments())
+            newLogProb = pInfo.logProbability + Math.log(countJoint + alphaJoint - 1) - Math.log(countMarginal + alphaMarginal - 1)
+        }
 
-        //Update Structural Probability
-        val newLogProb = pInfo.logProbability + Math.log(countJoint + alphaJoint - 1) - Math.log(countMarginal + alphaMarginal - 1)
-        */
-        val newLogProb = structuralPrior(pInfo.parentSet) + BDsScore(pInfo.child, pInfo.parentSet, pInfo.counts, 1.0)
+
         pInfo.copy(logProbability = newLogProb)
     }
 

@@ -6,7 +6,8 @@
   "expertAdviceInterval" : 10,
   "policyErrorTolerance" : 0.1,
   "maxEpisodeLength" : 50,
-  "pruneRange" : 0.01,
+  "pruneRange" : 0.001,
+  "conserveVals": true,
   "dbnUpdater" : {
     "type": "degris",
     "singleParentProb": 0.1,

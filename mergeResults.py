@@ -24,4 +24,4 @@ for experiment_folder in os.listdir(results_folder):
 
     experiment_name = os.path.basename(experiment_folder)
     print(experiment_name)
-    ch.merge_and_save(policy_error_files, os.path.join(merge_folder, "{0}-{1}.csv".format(experiment_name, metric_name)), 10000)
+    ch.merge_and_save(policy_error_files, os.path.join(merge_folder, "{0}-{1}.csv".format(experiment_name, metric_name)))

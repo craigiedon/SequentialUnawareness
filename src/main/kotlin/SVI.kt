@@ -1,5 +1,6 @@
 import Utils.productBy
 import Utils.productByDouble
+import kotlin.streams.toList
 
 sealed class DecisionTree<T>
 data class DTLeaf<T>(val value: T) : DecisionTree<T>()
@@ -94,6 +95,12 @@ fun convertToCPTNoPrior(childRV: RandomVariable, itiTree: ProbNode) : DecisionTr
 // Take a decision tree for joint probabilities, find all leaves that match assignment, and combine them
 // For leaves that make no assignment to some vars in parent assignment, assume counts would be uniformly distributed over missing context
 fun jointQuery(parentAssgn : Map<RVTest, Boolean>, jointDT: DecisionTree<Factor>) : Factor{
+    val groupedTests = parentAssgn.entries.groupBy { it.key.first }
+    for((rv, testGroup) in groupedTests){
+        if(testGroup.count{ it.value } > 1){
+            throw IllegalArgumentException("Conflicting parent assignments. Query is ill-formed: $parentAssgn")
+        }
+    }
     fun jointQueryRec(dt : DecisionTree<Factor>, matchedTests: Set<RVTest>) : Factor =
         when(dt){
             is DTLeaf -> {
@@ -321,9 +328,10 @@ fun incrementalSVI(rewardTree : DecisionTree<Double>,
                    pruningRange: Double) : Pair<DecisionTree<Range>, Map<Action, DecisionTree<Range>>>{
 
     val qTrees = actionDBNs.entries
-        //.parallelStream()
-        .asSequence()
+        .parallelStream()
+        //.asSequence()
         .map { (action, dbn) -> Pair(action, regressRanged (valueTree, rewardTree, dbn, terminalDescriptions, discountFactor)) }
+        .toList()
         .associate { it }
 
     val testOrder = vocab.flatMap { rv -> rv.domain.indices.map { RVTest(rv, it) } }
@@ -614,9 +622,9 @@ fun unifStartIDTransJoint(vocab : Collection<RandomVariable>) =
 
 fun unifStartIDTransJoint(rv : RandomVariable) : DecisionTree<Factor> {
     fun unifStartRec(remainingDomain : List<Int>) : DecisionTree<Factor> {
-        val condFac = detFactor(rv, remainingDomain[0])
-        val jointFac = Factor(condFac.scope, condFac.values.map { it / rv.domainSize })
-        val detLeaf = DTLeaf(jointFac)
+        val conditionalProb = detFactor(rv, remainingDomain[0])
+        val jointProb = scale(conditionalProb, 1.0 / rv.domainSize)
+        val detLeaf = DTLeaf(jointProb)
 
         return when(remainingDomain.size){
             1 -> detLeaf
