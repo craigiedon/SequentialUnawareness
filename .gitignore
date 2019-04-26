@@ -3,3 +3,5 @@ build
 *.gv.pdf
 *.pyc
 mdpVisuals/
+logs
+out

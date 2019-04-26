@@ -1,0 +1,19 @@
+{
+  "experimentName" : "DefaultFullLattice",
+  "numTrials" : 10000,
+  "exploreAmount" : 0.1,
+  "useTrue" : false,
+  "expertAdviceInterval" : 10,
+  "policyErrorTolerance" : 0.1,
+  "maxEpisodeLength" : 50,
+  "pruneRange" : 0.001,
+  "conserveVals": true,
+  "dbnUpdater" : {
+    "type": "buntine",
+    "structUpdateInterval" : 1000000,
+    "maxParents" : 4,
+    "aliveThresh" : 0.00,
+    "pseudoCountSize" : 5.0,
+    "singleParentProb" : 0.1
+  }
+}

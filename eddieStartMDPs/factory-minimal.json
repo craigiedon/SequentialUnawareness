@@ -1,0 +1,5 @@
+{
+  "variables" : ["connected"],
+  "actions" : ["bolt", "glue", "drillb", "drilla"],
+  "rewardDomain" : ["connected"]
+}
